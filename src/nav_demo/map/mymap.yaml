@@ -1,4 +1,4 @@
-image: /home/mowen/bit_ws/src/nav_demo/map/mymap.pgm
+image: mymap.pgm
 resolution: 0.010000
 origin: [-7.000000, -1.000000, 0.000000]
 negate: 0
