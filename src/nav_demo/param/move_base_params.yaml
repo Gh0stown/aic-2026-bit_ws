@@ -1,0 +1,18 @@
+# move_base软件包的通用配置参数
+shutdown_costmaps: false
+
+controller_frequency: 5.0
+controller_patience: 5.0
+
+planner_frequency: 0.5
+planner_patience: 8.0
+
+oscillation_timeout: 10.0
+oscillation_distance: 0.5
+
+base_local_planner: "dwa_local_planner/DWAPlannerROS"
+base_global_planner: "global_planner/GlobalPlanner"
+
+# 新增TF相关参数
+transform_tolerance: 1.0
+recovery_behavior_enabled: true

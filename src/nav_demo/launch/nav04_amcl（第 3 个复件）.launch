@@ -1,0 +1,60 @@
+<launch>
+    <node pkg="amcl" type="amcl" name="amcl" output="screen">
+        <!-- Publish scans from best pose at a max of 10 Hz -->
+        <param name="odom_model_type" value="omni"/>
+        <remap from="scan" to="scan"/>
+        <param name="gui_publish_rate" value="50.0"/>
+        
+        <!-- 激光参数 -->
+        <param name="laser_max_range" value="6"/>
+        <param name="laser_max_beams" value="360"/>
+        <param name="laser_z_hit" value="0.75"/>
+        <param name="laser_z_short" value="0.05"/>
+        <param name="laser_z_max" value="0.05"/>
+        <!-- 增加随机权重以应对打滑带来的不确定性，但避免过高导致定位模糊 -->
+        <param name="laser_z_rand" value="0.45"/>
+        <param name="laser_sigma_hit" value="0.2"/>
+        <param name="laser_lambda_short" value="0.1"/>
+        <param name="laser_model_type" value="likelihood_field"/>
+        <!-- 限制激光匹配搜索距离，防止因单次打滑粒子跳到远处 -->
+        <param name="laser_likelihood_max_dist" value="0.8"/>
+        
+        <!-- 粒子滤波器参数 -->
+        <!-- 减少最小粒子数以便在定位丢失时快速重发散 -->
+        <param name="min_particles" value="1000"/>
+        <!-- 增加最大粒子数以容纳更多位置假设，应对打滑的高不确定性 -->
+        <param name="max_particles" value="12000"/>
+        <param name="kld_err" value="0.01"/>
+        <param name="kld_z" value="0.95"/>
+        
+        <!-- 【核心平衡参数】里程计噪声模型 -->
+        <!-- 关键调整：适度不信任里程计以防打滑，但不至于完全抛弃它导致运动卡顿 -->
+        <param name="odom_alpha1" value="1.0"/>  <!-- 平移噪声 (X, Y) -->
+        <param name="odom_alpha2" value="1.2"/>  <!-- 旋转噪声 (Yaw) - 【回调点】：平衡旋转流畅性与防偏移 -->
+        <param name="odom_alpha3" value="1.0"/>  <!-- 平移噪声 (X, Y) -->
+        <param name="odom_alpha4" value="1.2"/>  <!-- 旋转噪声 (Yaw) - 【回调点】：平衡旋转流畅性与防偏移 -->
+        <param name="odom_alpha5" value="0.2"/>  <!-- 附加旋转噪声，保持较低 -->
+        
+        <!-- 更新条件 -->
+        <!-- 机器人移动超过此距离(米)或角度(弧度)才触发激光更新 -->
+        <param name="update_min_d" value="0.03"/>
+        <!-- 【关键平衡参数】：增大此值允许机器人根据里程计连续转弯一段后再用激光修正，从而减少卡顿 -->
+        <param name="update_min_a" value="0.05"/>
+        
+        <!-- 设置坐标系 -->
+        <param name="odom_frame_id" value="odom"/>
+        <param name="base_frame_id" value="base_link"/>
+        <param name="global_frame_id" value="/map"/>
+        
+        <!-- 系统与恢复参数 -->
+        <param name="resample_interval" value="2"/>          <!-- 降低重采样频率，防止有效粒子被过早剔除 -->
+        <param name="transform_tolerance" value="0.3"/>      <!-- 降低TF变换容错，对延迟和错误更敏感 -->
+        <param name="recovery_alpha_slow" value="0.001"/>    <!-- 慢速平均权重恢复 -->
+        <param name="recovery_alpha_fast" value="0.2"/>      <!-- 快速平均权重恢复，便于打滑后重定位 -->
+        
+        <!-- 初始位置 (通常通过2D Pose Estimate工具动态设置更佳) -->
+        <param name="initial_pose_x" value="0.0"/>
+        <param name="initial_pose_y" value="0.0"/>
+        <param name="initial_pose_a" value="0.0"/>
+    </node>
+</launch>

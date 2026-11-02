@@ -1,0 +1,427 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="mowen2">
+
+  <link
+    name="base_footprint"/>
+
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="-0.0718509386127855 0.00738215784490594 0.119676355791491"
+        rpy="0 0 0" />
+      <mass
+        value="7.78291953099975E-06" />
+      <inertia
+        ixx="1.25849372951706E-08"
+        ixy="1.29089020013628E-09"
+        ixz="-1.25396468733165E-18"
+        iyy="3.68265108559641E-09"
+        iyz="-8.82600151922111E-20"
+        izz="1.62660632312823E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/mecanum/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/mecanum/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="front_left_wheel">
+    <inertial>
+      <origin
+        xyz="-0.199119784807379 -0.138021691116814 0.071103918576079"
+        rpy="0 0 0" />
+      <mass
+        value="7.78291953099945E-06" />
+      <inertia
+        ixx="1.25849372951706E-08"
+        ixy="1.29089020013659E-09"
+        ixz="-1.25397068458052E-18"
+        iyy="3.68265108559631E-09"
+        iyz="-8.82736813406885E-20"
+        izz="1.62660632312823E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/mecanum/front_left_wheel.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/mecanum/front_left_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="front_left_joint"
+    type="continuous">
+    <origin
+      xyz="0.12727 0.1454 0.048572"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="front_left_wheel" />
+    <axis
+      xyz="0 1 0" />
+  </joint>
+  <link
+    name="front_right_wheel">
+    <inertial>
+      <origin
+        xyz="-0.199063466201963 0.152786006806629 0.0710729630656461"
+        rpy="0 0 0" />
+      <mass
+        value="7.78291953099945E-06" />
+      <inertia
+        ixx="1.25849372951707E-08"
+        ixy="1.29089020013647E-09"
+        ixz="-1.25396591258739E-18"
+        iyy="3.68265108559628E-09"
+        iyz="-8.82581209110238E-20"
+        izz="1.62660632312823E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/mecanum/front_right_wheel.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/mecanum/front_right_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="front_right_joint"
+    type="continuous">
+    <origin
+      xyz="0.12721 -0.1454 0.048603"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="front_right_wheel" />
+    <axis
+      xyz="0 1 0" />
+  </joint>
+  <link
+    name="back_left_wheel">
+    <inertial>
+      <origin
+        xyz="0.00789687485202048 -0.138021691116814 0.0710896498186508"
+        rpy="0 0 0" />
+      <mass
+        value="7.78291953099945E-06" />
+      <inertia
+        ixx="1.25849372951707E-08"
+        ixy="1.29089020013647E-09"
+        ixz="-1.25395919207575E-18"
+        iyy="3.68265108559628E-09"
+        iyz="-8.8282246737383E-20"
+        izz="1.62660632312823E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/mecanum/back_left_wheel.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/mecanum/back_left_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="back_left_joint"
+    type="continuous">
+    <origin
+      xyz="-0.079748 0.1454 0.048587"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="back_left_wheel" />
+    <axis
+      xyz="0 1 0" />
+  </joint>
+  <link
+    name="back_right_wheel">
+    <inertial>
+      <origin
+        xyz="0.00792558007520176 0.152786006806629 0.0712769954892365"
+        rpy="0 0 0" />
+      <mass
+        value="7.78291953099945E-06" />
+      <inertia
+        ixx="1.25849372951707E-08"
+        ixy="1.29089020013647E-09"
+        ixz="-1.25396591258739E-18"
+        iyy="3.68265108559628E-09"
+        iyz="-8.82581209110245E-20"
+        izz="1.62660632312823E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/mecanum/back_right_wheel.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/mecanum/back_right_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="back_right_joint"
+    type="continuous">
+    <origin
+      xyz="-0.079777 -0.1454 0.048399"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="back_right_wheel" />
+    <axis
+      xyz="0 1 0" />
+  </joint>
+  <link
+    name="imu_link">
+    <inertial>
+      <origin
+        xyz="-0.216043303058216 -0.0052321578449091 -0.0162763557914886"
+        rpy="0 0 0" />
+      <mass
+        value="7.78291953099945E-06" />
+      <inertia
+        ixx="1.25849372951707E-08"
+        ixy="-1.29089020013647E-09"
+        ixz="1.25396591258739E-18"
+        iyy="3.68265108559628E-09"
+        iyz="-8.82581209110243E-20"
+        izz="1.62660632312823E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/sensor/imu_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/sensor/imu_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="base_imu"
+    type="fixed">
+    <origin
+      xyz="0.14419 0.00215 0.1034"
+      rpy="3.1416 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="imu_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="camera_link">
+    <inertial>
+      <origin
+        xyz="-0.220993303058215 0.00787952902341162 -0.0803035792325282"
+        rpy="0 0 0" />
+      <mass
+        value="7.78291953099945E-06" />
+      <inertia
+        ixx="1.25849372951706E-08"
+        ixy="1.29089020013658E-09"
+        ixz="-1.25396359603132E-18"
+        iyy="3.68265108559631E-09"
+        iyz="-8.82807023666849E-20"
+        izz="1.62660632312823E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/sensor/camera_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/sensor/camera_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="camera_joint"
+    type="fixed">
+    <origin
+      xyz="0.14914 -0.00049737 0.19998"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="camera_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="laser_link">
+    <inertial>
+      <origin
+        xyz="-0.205591625169509 0.00738215784490645 -0.0163143442085112"
+        rpy="0 0 0" />
+      <mass
+        value="7.78291953099945E-06" />
+      <inertia
+        ixx="1.25849372951706E-08"
+        ixy="1.29089020013658E-09"
+        ixz="-1.25396359603132E-18"
+        iyy="3.68265108559631E-09"
+        iyz="-8.82807023666849E-20"
+        izz="1.62660632312823E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/sensor/laser_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://mowen2/meshes/sensor/laser_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="laser_joint"
+    type="fixed">
+    <origin
+      xyz="0.13374 0 0.13599"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="laser_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <joint name="base_joint" type="fixed">
+      <parent link="base_footprint"/>
+      <child link="base_link"/>
+      <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+  </joint>
+</robot>

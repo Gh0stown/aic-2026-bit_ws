@@ -1,0 +1,16 @@
+# 编译产物
+build/
+devel/
+install/
+logs/
+.catkin_workspace
+
+# 旧备份压缩包（与 src 内容重复）
+src.tar.xz
+
+# 机械臂包：实车没有机械臂，且占 1G 网格资源
+src/mycobot_ros/
+
+# Python 缓存
+*.pyc
+__pycache__/

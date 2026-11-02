@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- 关键修复：设置 respawn="true"，当amcl崩溃时自动重启 -->
+  <node pkg="amcl" type="amcl" name="amcl" output="screen" respawn="true" respawn_delay="5">
+    
+    <!-- 基础模型与重映射 -->
+    <param name="odom_model_type" value="omni"/>
+    <remap from="scan" to="scan"/>
+
+    <!-- 【关键调整】大幅降低里程计信任度，从根源上防止因打滑导致的快速发散 -->
+    <param name="odom_alpha1" value="1.5"/>
+    <param name="odom_alpha2" value="2.0"/>
+    <param name="odom_alpha3" value="1.5"/>
+    <param name="odom_alpha4" value="2.0"/>
+    <param name="odom_alpha5" value="0.5"/>
+
+    <!-- 激光参数：提高对“未知”和“随机”的容忍度，适应打滑时的异常扫描 -->
+    <param name="laser_max_range" value="6.0"/>
+    <param name="laser_max_beams" value="180"/> <!-- 降低分辨率，提升计算速度 -->
+    <param name="laser_z_hit" value="0.5"/>
+    <param name="laser_z_rand" value="0.5"/> <!-- 大幅提高随机噪声权重 -->
+    <param name="laser_model_type" value="likelihood_field"/>
+    <param name="laser_likelihood_max_dist" value="2.0"/> <!-- 扩大搜索范围 -->
+
+    <!-- 粒子滤波器参数：增加粒子数，提升鲁棒性 -->
+    <param name="min_particles" value="500"/>
+    <param name="max_particles" value="5000"/> <!-- 降低上限以减少计算负载，防止卡死 -->
+    <param name="kld_err" value="0.01"/>
+    <param name="kld_z" value="0.99"/>
+
+    <!-- 更新条件：放宽要求，确保在打滑时也能持续更新 -->
+    <param name="update_min_d" value="0.1"/>
+    <param name="update_min_a" value="0.2"/>
+
+    <!-- 坐标系设置（务必与move_base匹配） -->
+    <param name="odom_frame_id" value="odom"/>
+    <param name="base_frame_id" value="base_link"/>
+    <param name="global_frame_id" value="map"/> <!-- 确保是 “map”，不是 “/map” -->
+
+    <!-- 恢复行为：启用并强化恢复机制，帮助从失败中恢复 -->
+    <param name="recovery_alpha_slow" value="0.0"/>  <!-- 禁用慢速恢复，专注于快速重定位 -->
+    <param name="recovery_alpha_fast" value="1.0"/>  <!-- 最大化快速恢复，一旦定位差立即触发重采样 -->
+
+    <!-- TF设置：确保容差足够覆盖可能的延迟 -->
+    <param name="transform_tolerance" value="1.0"/> <!-- 大幅增加容差，确保TF树不断 -->
+    <param name="gui_publish_rate" value="10.0"/> <!-- 降低GUI发布率，节省资源 -->
+    <param name="resample_interval" value="1"/>
+
+    <!-- 初始位姿（通常通过2D Pose Estimate设置更佳） -->
+    <param name="initial_pose_x" value="0.0"/>
+    <param name="initial_pose_y" value="0.0"/>
+    <param name="initial_pose_a" value="0.0"/>
+  </node>
+</launch>

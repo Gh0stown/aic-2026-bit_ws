@@ -1,0 +1,24 @@
+ekf_localization_node:
+  frequency: 30
+  two_d_mode: false
+  publish_tf: true
+  output_frame: odom_combined
+  world_frame: map
+  base_link_frame: base_link
+  odom_used: true
+  odom_topic: /odom_topic
+  imu_used: true
+  imu0: /imu_topic
+
+imu_filter_node:
+  sensor_timeout: 0.1
+  world_frame: map
+  odom_frame: odom
+  base_link_frame: base_link
+  imu0: /imu_topic
+  enable_adaptive_gain: true
+  gain: 0.1
+  initial_roll: 0.0
+  initial_pitch: 0.0
+  initial_yaw: 0.0
+
