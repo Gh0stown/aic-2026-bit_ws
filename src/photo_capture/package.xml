@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>photo_capture</name>
+  <version>0.1.0</version>
+  <description>
+    本机摄像头手动拍照采集工具：启动时询问照片类型，照片按类型保存到对应文件夹；
+    支持设置一次连拍张数，运行中可随时更换类型。
+  </description>
+  <maintainer email="mowen@todo.todo">mowen</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <export />
+</package>

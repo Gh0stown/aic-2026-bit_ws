@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.0.2)
+project(photo_capture)
+
+find_package(catkin REQUIRED)
+
+catkin_package()
+
+catkin_install_python(PROGRAMS
+  scripts/capture_photos.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
