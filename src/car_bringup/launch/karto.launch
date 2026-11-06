@@ -1,0 +1,118 @@
+<!--
+  Karto (slam_karto) 建图启动文件
+
+  与 car_bringup/launch/gmapping.launch 完全相同的底层外设启动（雷达、模型、IMU、
+  轮式里程计 + EKF 融合、rviz），只把建图算法由 gmapping 换成 slam_karto。
+
+  使用方法：
+    rosrun 方式前先 source：source devel/setup.bash
+    建图：  roslaunch car_bringup karto.launch
+    保存：  roslaunch nav_demo nav02_map_save.launch filename:=karto_map_20261106
+
+  slam_karto 与 gmapping 的接口差异：
+    1. karto 订阅 /scan，发布 /map（nav_msgs/OccupancyGrid）以及 map -> odom 的 TF；
+       因此仍然需要底层提供 odom -> base_footprint 的 TF（这里由 EKF 提供）。
+    2. karto 使用图优化（scan-to-map 匹配 + 回环检测）而非粒子滤波，
+       没有 particles / resampleThreshold / srr 等运动模型参数。
+    3. 分辨率参数叫 resolution（也兼容 gmapping 的 delta），默认 0.05m。
+    4. 地图更新频率由自己控制，不需要像 gmapping 那样给很小的 linearUpdate。
+
+  注意：rviz 的 Fixed Frame 要设置为 map；若之前用 gmapping 的配置文件，
+       把 Global Options -> Fixed Frame 改成 map 即可（gmap.rviz 默认就是 map）。
+-->
+<launch>
+  <!-- ===================== 传感器 / 底盘 / 定位 ===================== -->
+  <!-- 加载雷达（lslidar_driver，发布 /scan，frame_id=laser_link，同时发布 base_link -> laser_link 静态 TF） -->
+  <include file="$(find lslidar_driver)/launch/lslidar_serial.launch" />
+  <!-- 加载机器人模型（URDF: base_footprint -> base_link） -->
+  <include file="$(find mowen)/launch/display.launch" />
+  <!-- 加载 IMU -->
+  <include file="$(find wit_ros_imu)/launch/wit_imu.launch" />
+
+  <!-- 启动 rviz（与 gmapping 建图用的是同一个配置文件） -->
+  <node pkg="rviz" type="rviz" name="rviz"
+        args="-d $(find nav_demo)/config/gmap.rviz"/>
+
+  <!-- 底盘速度下发 -->
+  <node pkg="car_bringup" name="pubv" type="pubv.py" />
+
+  <!-- 轮式里程计：发布 /odom_raw（未融合的原始里程计） -->
+  <node pkg="car_bringup" type="base_node" name="odometry_publisher">
+    <param name="odom_frame" type="string" value="odom"/>
+    <param name="base_footprint_frame" type="string" value="base_footprint"/>
+    <param name="linear_scale_x" type="double" value="1.0"/>
+    <param name="linear_scale_y" type="double" value="1.0"/>
+    <remap from="/sub_vel" to="/vel_raw"/>
+    <remap from="/pub_odom" to="/odom_raw"/>
+  </node>
+
+  <!-- 扩展卡尔曼滤波：融合轮式里程计 + IMU，发布 odom -> base_footprint 的 TF 和 /odom -->
+  <node pkg="robot_localization" type="ekf_localization_node" name="ekf_localization" output="screen">
+    <remap from="odometry/filtered" to="odom"/>
+    <remap from="/imu0" to="/wit/imu"/>
+    <remap from="/odom0" to="/odom_raw"/>
+    <param name="odom_frame" value="/odom"/>
+    <param name="world_frame" value="/odom"/>
+    <param name="base_link_frame" value="/base_footprint"/>
+    <rosparam command="load" file="$(find car_bringup)/param/robot_localization.yaml"/>
+  </node>
+
+  <!-- 若没有 IMU / 不想做 EKF 融合，可注释掉上面的 EKF 节点，
+       并让轮式里程计直接发布到 /odom（把 base_node 的 <remap from="/pub_odom" to="/odom_raw"/>
+       改成 to="/odom"），效果与 rf2o_laser_odometry/launch/gmapping_new.launch 类似。 -->
+
+  <!-- ===================== Karto 建图节点 ===================== -->
+  <node pkg="slam_karto" type="slam_karto" name="slam_karto" output="screen">
+    <!-- 输入激光话题（节点内部订阅的是相对话题 scan，这里显式映射到 /scan） -->
+    <remap from="scan" to="/scan"/>
+
+    <!-- ===== 坐标系 / 地图输出 ===== -->
+    <param name="odom_frame" value="odom"/>              <!-- 里程计坐标系，必须与 EKF 发布的一致（不要带前导斜杠） -->
+    <param name="map_frame" value="map"/>                <!-- 地图坐标系 -->
+    <param name="base_frame" value="base_footprint"/>    <!-- 机器人基座坐标系；slam_karto 默认是 base_link，本车必须改成 base_footprint -->
+    <param name="throttle_scans" value="1"/>             <!-- 每 N 帧激光处理一次，1 表示全部处理 -->
+    <param name="map_update_interval" value="1.0"/>      <!-- 地图（/map 与 map->odom TF）更新周期，单位秒；越小 rviz 刷新越快、CPU 占用越高 -->
+    <param name="resolution" value="0.025"/>             <!-- 地图栅格分辨率，单位米。0.05 时墙体占 2~3 格=10~15cm 偏厚；0.025 约 5~8cm，兼顾精度与性能；0.01 最接近 gmapping，但栅格数相对 0.05 约 25 倍 -->
+    <param name="transform_publish_period" value="0.05"/> <!-- map->odom TF 的发布周期，20Hz -->
+    <param name="transform_tolerance" value="0.5"/>      <!-- TF 时间戳容差，单位秒；雷达或 TF 稍有延迟时可适当加大 -->
+
+    <!-- ===== 通用参数 ===== -->
+    <param name="use_scan_matching" value="true"/>       <!-- 开启扫描匹配，Karto 的核心 -->
+    <param name="use_scan_barycenter" value="true"/>     <!-- 用激光重心做匹配，可提高匹配稳定性 -->
+    <param name="minimum_time_interval" value="0.5"/>    <!-- 两帧参与建图的最小时间间隔（秒） -->
+    <param name="minimum_travel_distance" value="0.1"/>  <!-- 或移动超过该距离（米）才处理新帧 -->
+    <param name="minimum_travel_heading" value="0.174"/> <!-- 或转动超过该角度（弧度，约 10°）才处理新帧 -->
+    <param name="scan_buffer_size" value="70"/>          <!-- 扫描缓冲区长度，影响可回环的历史范围 -->
+    <param name="scan_buffer_maximum_scan_distance" value="20.0"/> <!-- 扫描点距原点超过该距离（米）时移出缓冲区 -->
+    <param name="link_match_minimum_response_fine" value="0.8"/>   <!-- 帧间匹配的最小响应值，越大越严格 -->
+    <param name="link_scan_maximum_distance" value="10.0"/>        <!-- 两帧之间建立约束的最大距离（米） -->
+
+    <!-- ===== 回环检测 ===== -->
+    <param name="do_loop_closing" value="true"/>                       <!-- 开启回环检测（Karto 相对 gmapping 的最大优势之一） -->
+    <param name="loop_search_maximum_distance" value="4.0"/>           <!-- 回环搜索半径（米） -->
+    <param name="loop_match_minimum_chain_size" value="10"/>           <!-- 回环所需的最小链长度 -->
+    <param name="loop_match_maximum_variance_coarse" value="0.4"/>     <!-- 粗匹配允许的最大方差（内部会平方） -->
+    <param name="loop_match_minimum_response_coarse" value="0.8"/>     <!-- 粗匹配最小响应值 -->
+    <param name="loop_match_minimum_response_fine" value="0.8"/>       <!-- 精匹配最小响应值 -->
+
+    <!-- ===== 相关性搜索（粗匹配） ===== -->
+    <param name="correlation_search_space_dimension" value="0.3"/>       <!-- 搜索窗口大小（米） -->
+    <param name="correlation_search_space_resolution" value="0.01"/>     <!-- 搜索步长（米） -->
+    <param name="correlation_search_space_smear_deviation" value="0.03"/> <!-- 高斯模糊标准差（米），抗噪用 -->
+
+    <!-- ===== 回环搜索空间 ===== -->
+    <param name="loop_search_space_dimension" value="8.0"/>
+    <param name="loop_search_space_resolution" value="0.05"/>
+    <param name="loop_search_space_smear_deviation" value="0.03"/>
+
+    <!-- ===== 扫描匹配器惩罚项（此版本直接按弧度/米使用，不自动换算） ===== -->
+    <param name="distance_variance_penalty" value="0.3"/>
+    <param name="angle_variance_penalty" value="0.349"/>
+    <param name="fine_search_angle_offset" value="0.00349"/>   <!-- 精匹配角度搜索半径（弧度，约 0.2°） -->
+    <param name="coarse_search_angle_offset" value="0.349"/>   <!-- 粗匹配角度搜索半径（弧度，约 20°） -->
+    <param name="coarse_angle_resolution" value="0.0349"/>     <!-- 粗匹配角度步长（弧度，约 2°） -->
+    <param name="minimum_angle_penalty" value="0.9"/>
+    <param name="minimum_distance_penalty" value="0.5"/>
+    <param name="use_response_expansion" value="false"/>
+  </node>
+</launch>

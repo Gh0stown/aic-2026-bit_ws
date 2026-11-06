@@ -1,0 +1,8 @@
+<!--
+  兼容入口：与 src/gmapping.launch 同级，方便直接用绝对路径启动：
+    roslaunch /home/mowen/bit_ws/src/karto.launch
+  实际内容在 car_bringup/launch/karto.launch，参数请改那个文件。
+-->
+<launch>
+  <include file="$(find car_bringup)/launch/karto.launch" />
+</launch>
