@@ -3,13 +3,18 @@
   <name>photo_capture</name>
   <version>0.1.0</version>
   <description>
-    本机摄像头手动拍照采集工具：启动时询问照片类型，照片按类型保存到对应文件夹；
-    支持设置一次连拍张数，运行中可随时更换类型。
+    摄像头拍照采集、YOLO 实时检测和区域平移扫描拼图：按类型保存照片，加载 .pt 权重实时检测，
+    或控制麦轮底盘横向平移、逐帧拍摄并拼成横向大图。
   </description>
   <maintainer email="mowen@todo.todo">mowen</maintainer>
   <license>BSD</license>
 
   <buildtool_depend>catkin</buildtool_depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
 
   <export />
 </package>

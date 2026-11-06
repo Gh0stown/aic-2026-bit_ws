@@ -9,3 +9,11 @@ catkin_install_python(PROGRAMS
   scripts/capture_photos.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
+
+install(FILES
+  scripts/yolo_detect.py
+  scripts/scan.py
+  scripts/stitch.py
+  scripts/chassis.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)

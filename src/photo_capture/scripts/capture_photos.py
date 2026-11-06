@@ -6,44 +6,86 @@
   * 启动时询问本次要拍的照片类型，照片保存到 <输出目录>/<类型>/ 下；
   * 一次拍照可以连拍 N 张（N 随时可改），也可以单张拍；
   * 运行中随时可以切换类型，换类型后自动建对应的文件夹；
+  * 启动时可以选择「拍照模式」「模型测试模式」或「区域扫描模式」；
+    模型测试模式会加载 ~/AI视觉 下的 .pt 权重，实时画框显示识别结果；
+    区域扫描模式控制麦轮底盘横向平移，逐帧拍摄并拼成横向大图；
   * 有桌面环境时用 tkinter 做预览窗口（OpenCV 只负责读摄像头和写图片），
     没有图形界面时自动退化为命令行交互模式。
 
-快捷键（图形界面）：
+拍照模式快捷键（图形界面）：
   空格 / 回车  拍照（按设定张数连拍）
   T            更换类型
   N            修改一次连拍张数
   Esc          退出
 
+模型测试模式快捷键（图形界面）：
+  M            更换模型
+  S            保存当前帧（带检测框）
+  Esc          退出
+
+区域扫描模式（图形界面）：
+  开始/停止    平移采集或手动录制
+  Esc          停止并退出
+  拼接完成后可点「检测全景」做分块 YOLO
+
 命令行模式（--no-gui）：
-  直接回车 / p  拍照
-  t [类型]      更换类型
-  n [张数]      修改连拍张数
-  q             退出
+  拍照模式：回车拍照，t 换类型，n 改张数，q 退出
+  模型测试：实时打印检测结果，Ctrl+C 退出
+  区域扫描：自动平移或手动录制，Ctrl+C/回车停止并拼接
 """
 
 import argparse
+import json
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import cv2
+import numpy as np
+
+# 让脚本通过绝对路径 / rosrun 运行时都能 import 同目录的 yolo_detect
+_SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+try:  # YOLO 检测模块；缺失时只影响模型测试模式
+    import yolo_detect
+
+    YOLO_MODULE_AVAILABLE = True
+except Exception:  # pragma: no cover - 取决于运行环境
+    yolo_detect = None
+    YOLO_MODULE_AVAILABLE = False
+
+try:  # 区域扫描模块；缺失时只影响区域扫描模式
+    import scan as scan_module
+
+    SCAN_MODULE_AVAILABLE = True
+except Exception:  # pragma: no cover - 取决于运行环境
+    scan_module = None
+    SCAN_MODULE_AVAILABLE = False
+
+# find_spec 只查包在不在，不真正 import，启动不会被拖慢
+YOLO_RUNTIME_AVAILABLE = bool(
+    YOLO_MODULE_AVAILABLE and yolo_detect.ultralytics_available())
 
 try:  # tkinter 可能没装，此时退回命令行模式
     import tkinter as tk
     import tkinter.font as tkfont
-    from tkinter import messagebox, ttk
+    from tkinter import filedialog, messagebox, ttk
 
     TK_AVAILABLE = True
 except Exception:  # pragma: no cover - 取决于运行环境
     tk = None
     tkfont = None
     ttk = None
+    filedialog = None
     messagebox = None
     TK_AVAILABLE = False
 
@@ -62,6 +104,10 @@ MAX_PREVIEW_W = 960
 MAX_PREVIEW_H = 720
 MAX_BURST = 99
 MAX_TYPE_LEN = 40
+DEFAULT_MODEL_DIR = Path.home() / "AI视觉"
+MODE_PHOTO = "photo"
+MODE_DETECT = "detect"
+MODE_SCAN = "scan"
 
 CJK_FONT_CANDIDATES = (
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -149,6 +195,113 @@ def shorten(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:max(1, limit - 1)] + "…"
+
+
+def annotate_detections(image, boxes, names, font_size: int = 24):
+    """在 BGR 图上画检测框，返回新的 BGR 图；没有 PIL 时原样返回。"""
+    if not PIL_AVAILABLE or image is None:
+        return image
+    try:
+        pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil)
+        width, height = pil.size
+        font = None
+        font_path = find_cjk_font()
+        if font_path:
+            try:
+                font = ImageFont.truetype(font_path, font_size)
+            except Exception:
+                font = None
+        if font is None:
+            try:
+                font = ImageFont.load_default()
+            except Exception:
+                font = None
+        palette = (
+            (230, 70, 70), (70, 160, 230), (80, 190, 120), (240, 170, 60),
+            (170, 110, 220), (240, 100, 180), (90, 200, 200), (200, 200, 80),
+        )
+        for box in boxes:
+            x1, y1, x2, y2, conf, class_id = box
+            x1, y1, x2, y2 = [int(round(v)) for v in (x1, y1, x2, y2)]
+            color = palette[int(class_id) % len(palette)]
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+            if font is None:
+                continue
+            label = "{} {:.2f}".format(names.get(int(class_id), str(class_id)), conf)
+            bbox = draw.textbbox((0, 0), label, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            tx = min(max(0, x1), max(0, width - text_width - 8))
+            ty = y1 - text_height - 6
+            if ty < 0:
+                ty = min(max(0, y1 + 2), max(0, height - text_height - 6))
+            draw.rectangle([tx, ty, tx + text_width + 8, ty + text_height + 6],
+                           fill=color)
+            text_color = (0, 0, 0) if sum(color) > 420 else (255, 255, 255)
+            draw.text((tx + 3, ty + 3 - bbox[1]), label,
+                      font=font, fill=text_color)
+        return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    except Exception:
+        return image
+
+
+def save_detection_crops(frame, boxes, names, model_dir, prefix: str = "crop",
+                         quality: int = 95, pad: int = 4, source: str = ""):
+    """把检测框裁成单张小图，按类别建子文件夹。
+
+    model_dir 由调用方给出（已经包含模型名），目录结构：
+        <model_dir>/<类别名>/<prefix>_<时间戳>_<序号>.jpg
+    同时在 model_dir 下写一份 manifest_<时间戳>.json。
+
+    返回 (保存数量, manifest 路径或 None)。
+    """
+    if frame is None or not boxes:
+        return 0, None
+    model_dir = Path(model_dir)
+    height, width = frame.shape[:2]
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    entries = []
+    for index, box in enumerate(boxes):
+        x1, y1, x2, y2, conf, class_id = box
+        x1 = max(0, min(width, int(round(x1)) - pad))
+        y1 = max(0, min(height, int(round(y1)) - pad))
+        x2 = max(0, min(width, int(round(x2)) + pad))
+        y2 = max(0, min(height, int(round(y2)) + pad))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        class_name = names.get(int(class_id), str(class_id))
+        folder = sanitize_type(class_name) or "class_{}".format(int(class_id))
+        class_dir = model_dir / folder
+        class_dir.mkdir(parents=True, exist_ok=True)
+        filename = "{}_{}_{:03d}.jpg".format(prefix, stamp, index + 1)
+        path = class_dir / filename
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0 or not cv2.imwrite(
+                str(path), crop, [int(cv2.IMWRITE_JPEG_QUALITY), quality]):
+            continue
+        entries.append({
+            "file": "{}/{}".format(folder, filename),
+            "class_id": int(class_id),
+            "class_name": class_name,
+            "conf": round(float(conf), 4),
+            "box": [x1, y1, x2, y2],
+        })
+    if not entries:
+        return 0, None
+    manifest = model_dir / "manifest_{}.json".format(stamp)
+    try:
+        with manifest.open("w", encoding="utf-8") as handle:
+            json.dump({
+                "source": source,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "frame_size": [width, height],
+                "count": len(entries),
+                "detections": entries,
+            }, handle, ensure_ascii=False, indent=2)
+    except OSError:
+        manifest = None
+    return len(entries), manifest
 
 
 def has_display() -> bool:
@@ -432,6 +585,271 @@ class AskTypeDialog(tk.Toplevel if TK_AVAILABLE else object):
     def _cancel(self) -> None:
         self.result = None
         self.destroy()
+
+
+class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
+    """启动时选择「拍照模式」或「模型测试模式」。"""
+
+    def __init__(self, parent, title: str = APP_TITLE):
+        if not TK_AVAILABLE:
+            raise RuntimeError("tkinter 不可用")
+        super().__init__(parent)
+        self.result = None
+        self.title(title)
+        self.resizable(False, False)
+        try:
+            if parent.winfo_viewable():
+                self.transient(parent)
+        except tk.TclError:
+            pass
+
+        self._title_font = tkfont.Font(root=self, size=15, weight="bold")
+        self._button_font = tkfont.Font(root=self, size=12, weight="bold")
+        self._sub_font = tkfont.Font(root=self, size=10)
+
+        body = ttk.Frame(self, padding=(24, 20))
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="请选择启动模式", font=self._title_font).pack(anchor="w")
+        ttk.Label(
+            body,
+            text="拍照采集训练照片；模型测试做实时 YOLO 检测；区域扫描用平移拼出大图。",
+            foreground="#666666",
+            font=self._sub_font,
+        ).pack(anchor="w", pady=(2, 18))
+
+        buttons = ttk.Frame(body)
+        buttons.pack()
+        self.photo_button = tk.Button(
+            buttons, text="拍照模式\n\n按类型采集照片",
+            width=14, height=4, justify="center", font=self._button_font,
+            relief="groove", bd=2, cursor="hand2",
+            command=lambda: self._choose(MODE_PHOTO),
+        )
+        self.photo_button.pack(side="left", padx=(0, 10))
+
+        if YOLO_RUNTIME_AVAILABLE:
+            self.detect_button = tk.Button(
+                buttons, text="模型测试\n\nYOLO 实时检测",
+                width=14, height=4, justify="center", font=self._button_font,
+                relief="groove", bd=2, cursor="hand2",
+                command=lambda: self._choose(MODE_DETECT),
+            )
+            self.detect_button.pack(side="left", padx=(0, 10))
+        else:
+            ttk.Label(
+                buttons, text="模型测试不可用\n（没装 ultralytics）",
+                justify="center", foreground="#b00020", width=16,
+            ).pack(side="left", padx=(0, 10))
+
+        if SCAN_MODULE_AVAILABLE:
+            self.scan_button = tk.Button(
+                buttons, text="区域扫描\n\n平移拼大图",
+                width=14, height=4, justify="center", font=self._button_font,
+                relief="groove", bd=2, cursor="hand2",
+                command=lambda: self._choose(MODE_SCAN),
+            )
+            self.scan_button.pack(side="left")
+        else:
+            ttk.Label(
+                buttons, text="区域扫描不可用\n（缺少 scan.py）",
+                justify="center", foreground="#b00020", width=16,
+            ).pack(side="left")
+
+        ttk.Label(
+            body,
+            text="提示：按数字键 1 / 2 / 3 也可以选择，Esc 取消。",
+            foreground="#888888",
+            font=self._sub_font,
+        ).pack(pady=(16, 0))
+
+        self.bind("<KeyPress-1>", lambda event: self._choose(MODE_PHOTO))
+        self.bind("<KeyPress-2>", lambda event: self._choose(MODE_DETECT))
+        self.bind("<KeyPress-3>", lambda event: self._choose(MODE_SCAN))
+        self.bind("<Escape>", lambda event: self._cancel())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+        self.update_idletasks()
+        self._center()
+        self.photo_button.focus_set()
+
+    def _center(self) -> None:
+        self.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        x = max(0, (self.winfo_screenwidth() - width) // 2)
+        y = max(0, (self.winfo_screenheight() - height) // 3)
+        self.geometry("+{}+{}".format(x, y))
+
+    def _choose(self, mode: str) -> None:
+        if mode == MODE_DETECT and not YOLO_RUNTIME_AVAILABLE:
+            return
+        if mode == MODE_SCAN and not SCAN_MODULE_AVAILABLE:
+            return
+        self.result = mode
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
+class ModelDialog(tk.Toplevel if TK_AVAILABLE else object):
+    """选择模型测试模式要用的 .pt 权重。"""
+
+    def __init__(self, parent, model_dir, initial_model=None,
+                 title: str = "选择 YOLO 模型"):
+        if not TK_AVAILABLE:
+            raise RuntimeError("tkinter 不可用")
+        if not YOLO_MODULE_AVAILABLE:
+            raise RuntimeError("yolo_detect 模块不可用")
+        super().__init__(parent)
+        self.result = None
+        self.model_dir = Path(model_dir).expanduser()
+        self.selected = Path(initial_model).expanduser() if initial_model else None
+        if self.selected is not None and not self.selected.is_file():
+            self.selected = None
+
+        try:
+            self._models = yolo_detect.list_model_files(self.model_dir)
+        except Exception:
+            self._models = []
+        if self.selected is not None and self.selected not in self._models:
+            self._models.insert(0, self.selected)
+
+        self.path_var = tk.StringVar(value="")
+        self.error_var = tk.StringVar(value="")
+        self.title(title)
+        self.resizable(False, False)
+        try:
+            if parent.winfo_viewable():
+                self.transient(parent)
+        except tk.TclError:
+            pass
+
+        self._title_font = tkfont.Font(root=self, size=14, weight="bold")
+        self._sub_font = tkfont.Font(root=self, size=10)
+        self._build()
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Return>", lambda event: self._ok())
+        self.bind("<Escape>", lambda event: self._cancel())
+
+        if self._models:
+            index = 0
+            if self.selected in self._models:
+                index = self._models.index(self.selected)
+            self.listbox.selection_set(index)
+            self.listbox.see(index)
+            self._on_select()
+        if self.selected is not None:
+            self.path_var.set(str(self.selected))
+        self.update_idletasks()
+        self._center()
+
+    def _build(self) -> None:
+        body = ttk.Frame(self, padding=(20, 16))
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(body, text="选择要测试的 YOLO 模型",
+                  font=self._title_font).pack(anchor="w")
+        ttk.Label(
+            body,
+            text="模型目录：{}    双击列表项可直接开始".format(
+                display_path(self.model_dir)),
+            foreground="#666666",
+            font=self._sub_font,
+        ).pack(anchor="w", pady=(2, 10))
+
+        box = ttk.Frame(body)
+        box.pack(fill="both", expand=True)
+        self.listbox = tk.Listbox(
+            box, height=min(9, max(3, len(self._models))),
+            exportselection=False, width=46, font=("", 11),
+        )
+        self.listbox.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(
+            box, orient="vertical", command=self.listbox.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.listbox.configure(yscrollcommand=scrollbar.set)
+        self.listbox.bind("<<ListboxSelect>>", self._on_select)
+        self.listbox.bind("<Double-Button-1>", lambda event: self._ok())
+        self._refresh()
+        if not self._models:
+            ttk.Label(
+                body,
+                text="这个目录里没有 .pt 文件，点「浏览…」选择其他位置的模型。",
+                foreground="#b00020",
+                justify="left",
+            ).pack(anchor="w", pady=(6, 0))
+
+        ttk.Label(body, text="已选择：", font=self._sub_font).pack(
+            anchor="w", pady=(10, 0))
+        ttk.Label(
+            body, textvariable=self.path_var, foreground="#333333",
+            wraplength=560, justify="left",
+        ).pack(anchor="w")
+        ttk.Label(body, textvariable=self.error_var,
+                  foreground="#b00020").pack(anchor="w", pady=(4, 0))
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(12, 0))
+        ttk.Button(buttons, text="浏览…", command=self._browse).pack(side="left")
+        ttk.Button(buttons, text="开始检测", command=self._ok).pack(side="right")
+        ttk.Button(buttons, text="取消", command=self._cancel).pack(
+            side="right", padx=(0, 8))
+
+    def _refresh(self) -> None:
+        self._models = sorted(set(self._models), key=lambda p: p.name.lower())
+        self.listbox.delete(0, "end")
+        for path in self._models:
+            self.listbox.insert(
+                "end", "{}    ({})".format(path.name, yolo_detect.human_size(path)))
+
+    def _on_select(self, _event=None) -> None:
+        selection = self.listbox.curselection()
+        if not selection:
+            return
+        self.selected = self._models[selection[0]]
+        self.path_var.set(str(self.selected))
+        self.error_var.set("")
+
+    def _browse(self) -> None:
+        initial_dir = self.model_dir if self.model_dir.is_dir() else Path.home()
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="选择 YOLO 权重",
+            initialdir=str(initial_dir),
+            filetypes=[("PyTorch 权重", "*.pt"), ("所有文件", "*")],
+        )
+        if not path:
+            return
+        chosen = Path(path).expanduser()
+        if chosen not in self._models:
+            self._models.insert(0, chosen)
+        self._refresh()
+        index = self._models.index(chosen)
+        self.listbox.selection_clear(0, "end")
+        self.listbox.selection_set(index)
+        self.listbox.see(index)
+        self._on_select()
+
+    def _ok(self) -> None:
+        if self.selected is None or not self.selected.is_file():
+            self.error_var.set("请先选择一个 .pt 模型文件")
+            return
+        self.result = self.selected
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+    def _center(self) -> None:
+        self.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        x = max(0, (self.winfo_screenwidth() - width) // 2)
+        y = max(0, (self.winfo_screenheight() - height) // 3)
+        self.geometry("+{}+{}".format(x, y))
 
 
 # ---------------------------------------------------------------------------
@@ -793,15 +1211,1317 @@ class PhotoApp(object):
         self.root.destroy()
 
 
+class DetectApp(object):
+    """模型测试模式的主窗口：预览 + 实时画框 + 推理信息。"""
+
+    BOX_COLORS = (
+        (230, 70, 70), (70, 160, 230), (80, 190, 120), (240, 170, 60),
+        (170, 110, 220), (240, 100, 180), (90, 200, 200), (200, 200, 80),
+        (140, 150, 240), (240, 140, 100),
+    )
+
+    def __init__(self, root, camera, detector, model_path, output_root,
+                 model_dir, infer_device="auto", imgsz=640):
+        self.root = root
+        self.camera = camera
+        self.detector = detector
+        self.model_path = Path(model_path)
+        self.model_dir = Path(model_dir)
+        self.infer_device = infer_device
+        self.imgsz = int(imgsz)
+        self.snapshot_root = Path(output_root) / "模型测试"
+
+        self._photo = None
+        self._last_frame = None
+        self._frame_id = 0
+        self._recent_frames = {}
+        self._last_result_id = -1
+        self._last_error = ""
+        self._dialog_open = False
+        self._closed = False
+        self._after_id = None
+        self._failures = 0
+        self._next_reopen = 0.0
+        self._fps = 0.0
+        self._fps_count = 0
+        self._fps_start = time.monotonic()
+        self._font_path = find_cjk_font() if PIL_AVAILABLE else None
+        self._font_cache = {}
+        self._bold_font = tkfont.Font(root=root, size=12, weight="bold")
+
+        self.model_var = tk.StringVar(value=shorten(self.model_path.name, 26))
+        self.conf_var = tk.StringVar(value="{:.2f}".format(detector.conf))
+        self.infer_var = tk.StringVar(value="推理：--")
+        self.det_var = tk.StringVar(value="目标：0")
+        self.fps_var = tk.StringVar(value="预览：--")
+        self.status_var = tk.StringVar(value=self._model_summary())
+
+        self._build_ui()
+        self._bind_keys()
+        self.root.title("模型测试 - {}".format(self.model_path.name))
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.minsize(560, 420)
+        self._tick()
+
+    # -- 界面 ---------------------------------------------------------
+    def _model_summary(self) -> str:
+        names = [self.detector.names[key] for key in sorted(self.detector.names)]
+        preview = "、".join(names[:6])
+        if len(names) > 6:
+            preview += " 等"
+        return "模型：{} · {} 类（{}）".format(
+            display_path(self.model_path), len(names), preview)
+
+    def _build_ui(self) -> None:
+        top = ttk.Frame(self.root, padding=(14, 12, 14, 4))
+        top.pack(fill="x")
+        ttk.Label(top, text="模型：").pack(side="left")
+        ttk.Label(top, textvariable=self.model_var,
+                  font=self._bold_font).pack(side="left")
+        ttk.Button(top, text="更换模型 (M)",
+                   command=self.change_model).pack(side="left", padx=(8, 0))
+
+        ttk.Label(top, text="置信度：").pack(side="left", padx=(14, 2))
+        self.conf_spin = ttk.Spinbox(
+            top, from_=0.05, to=0.95, increment=0.05, width=5,
+            textvariable=self.conf_var, command=self._sync_conf)
+        self.conf_spin.pack(side="left")
+        self.conf_spin.bind("<Return>", lambda event: self._sync_conf())
+        self.conf_spin.bind("<FocusOut>", lambda event: self._sync_conf())
+
+        ttk.Label(top, textvariable=self.infer_var).pack(side="left", padx=(14, 0))
+        ttk.Label(top, textvariable=self.det_var).pack(side="left", padx=(10, 0))
+        ttk.Button(top, text="保存当前帧 (S)",
+                   command=self.save_snapshot).pack(side="right")
+        ttk.Button(top, text="保存裁剪图 (C)",
+                   command=self.save_crops).pack(side="right", padx=(0, 6))
+
+        self.preview = tk.Label(
+            self.root, bg="#141414", fg="#bbbbbb",
+            text="正在打开摄像头…", takefocus=True,
+        )
+        self.preview.pack(fill="both", expand=True, padx=14, pady=6)
+        self.preview.bind("<Button-1>", lambda event: self.preview.focus_set())
+
+        bottom = ttk.Frame(self.root, padding=(14, 0, 14, 10))
+        bottom.pack(fill="x")
+        self.status_label = ttk.Label(
+            bottom, textvariable=self.status_var, foreground="#444444")
+        self.status_label.pack(side="left")
+        ttk.Label(bottom, textvariable=self.fps_var,
+                  foreground="#666666").pack(side="right")
+
+    def _bind_keys(self) -> None:
+        self.root.bind("<KeyPress-m>", self._on_key_m)
+        self.root.bind("<KeyPress-M>", self._on_key_m)
+        self.root.bind("<KeyPress-s>", self._on_key_s)
+        self.root.bind("<KeyPress-S>", self._on_key_s)
+        self.root.bind("<KeyPress-c>", self._on_key_c)
+        self.root.bind("<KeyPress-C>", self._on_key_c)
+        self.root.bind("<Escape>", lambda event: self.close())
+
+    def _focus_is_text(self) -> bool:
+        widget = self.root.focus_get()
+        if widget is None:
+            return False
+        return isinstance(widget, (tk.Entry, tk.Text, tk.Spinbox,
+                                   ttk.Entry, ttk.Spinbox))
+
+    def _on_key_m(self, event=None):
+        if self._focus_is_text() or self._dialog_open:
+            return None
+        self.change_model()
+        return "break"
+
+    def _on_key_s(self, event=None):
+        if self._focus_is_text() or self._dialog_open:
+            return None
+        self.save_snapshot()
+        return "break"
+
+    def _on_key_c(self, event=None):
+        if self._focus_is_text() or self._dialog_open:
+            return None
+        self.save_crops()
+        return "break"
+
+    # -- 参数 / 状态 ---------------------------------------------------
+    def _current_conf(self) -> float:
+        try:
+            value = float(self.conf_var.get())
+        except (TypeError, ValueError):
+            return self.detector.conf
+        return max(0.01, min(0.99, value))
+
+    def _sync_conf(self) -> None:
+        try:
+            value = float(self.conf_var.get())
+        except (TypeError, ValueError):
+            self.conf_var.set("{:.2f}".format(self.detector.conf))
+            return
+        value = max(0.01, min(0.99, value))
+        self.detector.set_conf(value)
+        text = "{:.2f}".format(value)
+        if self.conf_var.get().strip() != text:
+            self.conf_var.set(text)
+
+    def _set_status(self, text: str, error: bool = False) -> None:
+        self.status_var.set(text)
+        self.status_label.configure(foreground="#b00020" if error else "#444444")
+
+    # -- 主循环 -------------------------------------------------------
+    def _tick(self) -> None:
+        if self._closed:
+            return
+        now = time.monotonic()
+
+        if self.camera.cap is None:
+            self._try_reopen()
+
+        frame = self.camera.read() if self.camera.cap is not None else None
+        if frame is None:
+            self._failures += 1
+            if self._failures == 12:
+                self._set_status("摄像头没有画面，正在尝试重连…", error=True)
+                self.camera.release()
+        else:
+            if self._failures >= 12:
+                self._set_status("摄像头已恢复")
+            self._failures = 0
+            self._last_frame = frame
+            self._frame_id += 1
+            self._recent_frames[self._frame_id] = frame
+            cutoff = self._frame_id - 20
+            for key in list(self._recent_frames):
+                if key < cutoff:
+                    del self._recent_frames[key]
+            self.detector.submit(frame, self._frame_id)
+
+            latest = self.detector.latest()
+            self._render(frame, latest)
+            self._update_stats(latest, now)
+
+        try:
+            self._after_id = self.root.after(20, self._tick)
+        except tk.TclError:
+            self._after_id = None
+
+    def _update_stats(self, latest, now: float) -> None:
+        self._fps_count += 1
+        elapsed = now - self._fps_start
+        if elapsed >= 0.5:
+            self._fps = self._fps_count / elapsed
+            self._fps_count = 0
+            self._fps_start = now
+            self.fps_var.set("预览：{:.1f} fps".format(self._fps))
+
+        if latest is None:
+            return
+        frame_id, boxes, infer_ms = latest
+        if frame_id != self._last_result_id:
+            self._last_result_id = frame_id
+            self.infer_var.set("推理：{} ms".format(int(round(infer_ms))))
+            self.det_var.set("目标：{}".format(len(boxes)))
+
+        error = getattr(self.detector, "last_error", "")
+        if not error:
+            if self._last_error:
+                self._last_error = ""
+                self._set_status(self._model_summary())
+        elif error != self._last_error:
+            self._last_error = error
+            self._set_status("推理出错：{}".format(error[:100]), error=True)
+
+    def _try_reopen(self) -> None:
+        now = time.monotonic()
+        if now < self._next_reopen:
+            return
+        self._next_reopen = now + 2.0
+        try:
+            self.camera.open()
+        except CameraError as error:
+            self._set_status(
+                "摄像头连接失败：{}".format(str(error).splitlines()[0]), error=True)
+            return
+        width, height = self.camera.frame_size
+        self._set_status("摄像头已连接：{}x{}".format(width, height))
+        self._failures = 0
+
+    # -- 绘制 ---------------------------------------------------------
+    def _render(self, frame, latest) -> None:
+        if not PIL_AVAILABLE:
+            return
+        boxes = latest[1] if latest else []
+        infer_ms = latest[2] if latest else 0.0
+        height, width = frame.shape[:2]
+        scale = min(1.0, float(MAX_PREVIEW_W) / width, float(MAX_PREVIEW_H) / height)
+        if scale < 1.0:
+            display = cv2.resize(
+                frame, (max(1, int(width * scale)), max(1, int(height * scale))),
+                interpolation=cv2.INTER_AREA)
+        else:
+            display = frame
+        try:
+            image = Image.fromarray(cv2.cvtColor(display, cv2.COLOR_BGR2RGB))
+            image = self._annotate(image, boxes, scale, infer_ms=infer_ms)
+            photo = ImageTk.PhotoImage(image)
+        except Exception:
+            return
+        self._photo = photo
+        self.preview.configure(image=photo, text="")
+
+    def _annotate(self, image, boxes, scale: float, infer_ms: float = 0.0,
+                  font_size: int = 18):
+        draw = ImageDraw.Draw(image)
+        width, height = image.size
+
+        for box in boxes:
+            x1, y1, x2, y2, conf, class_id = box
+            x1, y1, x2, y2 = [int(round(value * scale)) for value in (x1, y1, x2, y2)]
+            color = self.BOX_COLORS[class_id % len(self.BOX_COLORS)]
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+
+            font = self._get_font(font_size)
+            if font is None:
+                continue
+            name = self.detector.names.get(class_id, str(class_id))
+            label = "{} {:.2f}".format(name, conf)
+            bbox = draw.textbbox((0, 0), label, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            tx = min(max(0, x1), max(0, width - text_width - 8))
+            ty = y1 - text_height - 6
+            if ty < 0:
+                ty = min(y1 + 2, max(0, height - text_height - 6))
+            draw.rectangle(
+                [tx, ty, tx + text_width + 8, ty + text_height + 6], fill=color)
+            text_color = (0, 0, 0) if sum(color) > 420 else (255, 255, 255)
+            draw.text((tx + 3, ty + 3 - bbox[1]), label,
+                      font=font, fill=text_color)
+
+        header = "{}  |  目标 {}  |  推理 {} ms  |  {:.0f} fps".format(
+            self.model_var.get(), len(boxes), int(round(infer_ms)), self._fps)
+        self._draw_header(draw, header, width, height)
+        return image
+
+    def _draw_header(self, draw, text: str, width: int, height: int) -> None:
+        font = self._get_font(20)
+        if font is None:
+            return
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        draw.rectangle(
+            [10, 10, min(width, 10 + text_width + 18),
+             min(height, 10 + text_height + 18)],
+            fill=(0, 0, 0))
+        draw.text((19, 19 - bbox[1]), text, font=font, fill=(255, 255, 255))
+
+    def _get_font(self, size: int):
+        if size in self._font_cache:
+            return self._font_cache[size]
+        font = None
+        if self._font_path:
+            try:
+                font = ImageFont.truetype(self._font_path, size)
+            except Exception:
+                self._font_path = None
+        if font is None:
+            try:
+                font = ImageFont.load_default()
+            except Exception:
+                font = None
+        self._font_cache[size] = font
+        return font
+
+    # -- 模型 ---------------------------------------------------------
+    def change_model(self) -> None:
+        if self._dialog_open or self._closed:
+            return
+        self._dialog_open = True
+        try:
+            dialog = ModelDialog(
+                self.root, self.model_dir,
+                initial_model=str(self.model_path),
+                title="更换 YOLO 模型",
+            )
+            self.root.wait_window(dialog)
+            if not dialog.result:
+                return
+            new_path = dialog.result
+            self._set_status("正在加载模型：{}…".format(new_path.name))
+            self.root.update_idletasks()
+            try:
+                new_detector = yolo_detect.YoloDetector(
+                    new_path, self.infer_device, self.imgsz, self._current_conf())
+            except yolo_detect.ModelError as error:
+                messagebox.showerror("模型加载失败", str(error), parent=self.root)
+                self._set_status("模型加载失败，仍使用原模型", error=True)
+                return
+
+            old_detector = self.detector
+            self.detector = new_detector
+            self.model_path = new_path
+            self.model_var.set(shorten(new_path.name, 26))
+            self.root.title("模型测试 - {}".format(new_path.name))
+            self._last_result_id = -1
+            self._last_error = ""
+            old_detector.close()
+            self._set_status(self._model_summary())
+        finally:
+            self._dialog_open = False
+            if not self._closed:
+                try:
+                    self.preview.focus_set()
+                except tk.TclError:
+                    pass
+
+    # -- 截图 ---------------------------------------------------------
+    def save_snapshot(self) -> None:
+        if self._last_frame is None:
+            self._set_status("还没有摄像头画面", error=True)
+            return
+        latest = self.detector.latest()
+        boxes = latest[1] if latest else []
+        infer_ms = latest[2] if latest else 0.0
+        try:
+            image = Image.fromarray(
+                cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2RGB))
+            image = self._annotate(image, boxes, 1.0, infer_ms, font_size=24)
+            stem = sanitize_type(Path(self.detector.model_path).stem) or "model"
+            folder = self.snapshot_root / stem
+            folder.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            path = folder / "{}_{}.jpg".format(stem, stamp)
+            image.save(str(path), quality=92)
+        except Exception as error:
+            self._set_status("保存截图失败：{}".format(error), error=True)
+            return
+        self._set_status("已保存截图（{} 个目标）：{}".format(
+            len(boxes), display_path(path)))
+
+    def save_crops(self) -> None:
+        latest = self.detector.latest()
+        if latest is None:
+            self._set_status("还没有检测结果", error=True)
+            return
+        frame_id, boxes, _infer_ms = latest
+        if not boxes:
+            self._set_status("当前没有检测目标", error=True)
+            return
+        frame = self._recent_frames.get(frame_id)
+        if frame is None:
+            frame = self._last_frame
+        if frame is None:
+            self._set_status("没有可裁剪的画面", error=True)
+            return
+        model_stem = sanitize_type(Path(self.detector.model_path).stem) or "model"
+        model_dir = self.snapshot_root / model_stem / "裁剪"
+        try:
+            count, manifest = save_detection_crops(
+                frame, boxes, self.detector.names, model_dir,
+                prefix=model_stem, source="live")
+        except Exception as error:
+            self._set_status("保存裁剪图失败：{}".format(error), error=True)
+            return
+        if count <= 0:
+            self._set_status("没有有效的检测框可保存", error=True)
+            return
+        self._set_status("已保存 {} 张裁剪图（按类别）→ {}".format(
+            count, display_path(model_dir)))
+
+    # -- 关闭 ---------------------------------------------------------
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._after_id is not None:
+            try:
+                self.root.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+        try:
+            self.detector.close()
+        except Exception:
+            pass
+        self.camera.release()
+        self.root.destroy()
+
+
+class ScanDialog(tk.Toplevel if TK_AVAILABLE else object):
+    """区域扫描参数设置。"""
+
+    def __init__(self, parent, defaults, title: str = "区域扫描设置"):
+        if not TK_AVAILABLE:
+            raise RuntimeError("tkinter 不可用")
+        if not SCAN_MODULE_AVAILABLE:
+            raise RuntimeError("scan 模块不可用")
+        super().__init__(parent)
+        self.result = None
+        self.title(title)
+        self.resizable(False, False)
+        try:
+            if parent.winfo_viewable():
+                self.transient(parent)
+        except tk.TclError:
+            pass
+
+        self._title_font = tkfont.Font(root=self, size=14, weight="bold")
+        self._sub_font = tkfont.Font(root=self, size=10)
+        self._quality = int(getattr(defaults, "quality", 95))
+        self.mode_var = tk.StringVar(value=defaults.mode)
+        self.label_var = tk.StringVar(value=defaults.label)
+        self.frames_var = tk.StringVar(value=str(defaults.frames))
+        self.distance_var = tk.StringVar(value="%.2f" % defaults.distance_m)
+        self.direction_var = tk.StringVar(value=defaults.direction)
+        self.speed_var = tk.StringVar(value="%.2f" % defaults.speed)
+        self.settle_var = tk.StringVar(value="%.1f" % defaults.settle)
+        self.fps_var = tk.StringVar(value="%.0f" % defaults.fps)
+        self.auto_stitch_var = tk.BooleanVar(value=bool(defaults.auto_stitch))
+        self.record_video_var = tk.BooleanVar(value=bool(defaults.record_video))
+        self.error_var = tk.StringVar(value="")
+        self.summary_var = tk.StringVar(value="")
+
+        body = ttk.Frame(self, padding=(22, 16))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+
+        ttk.Label(body, text="区域扫描设置", font=self._title_font).grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(
+            body,
+            text="自动平移需要 newt.py；手动录制只录画面，不控制底盘（现有键盘遥控不支持横移）。",
+            foreground="#666666",
+            font=self._sub_font,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 10))
+
+        row = 2
+        ttk.Label(body, text="区域名称：").grid(row=row, column=0, sticky="w", pady=3)
+        ttk.Entry(body, textvariable=self.label_var, width=28).grid(
+            row=row, column=1, sticky="we", pady=3)
+        row += 1
+
+        ttk.Label(body, text="扫描方式：").grid(row=row, column=0, sticky="nw", pady=3)
+        modes = ttk.Frame(body)
+        modes.grid(row=row, column=1, sticky="w", pady=3)
+        self.auto_radio = ttk.Radiobutton(
+            modes, text="自动平移扫描", variable=self.mode_var,
+            value="strafe", command=self._update_state)
+        self.auto_radio.pack(side="left")
+        self.manual_radio = ttk.Radiobutton(
+            modes, text="手动录制（自己移动）", variable=self.mode_var,
+            value="manual", command=self._update_state)
+        self.manual_radio.pack(side="left", padx=(16, 0))
+        row += 1
+
+        ttk.Label(body, text="总距离（米）：").grid(row=row, column=0, sticky="w", pady=3)
+        self.distance_spin = ttk.Spinbox(
+            body, from_=0.1, to=5.0, increment=0.1, width=7,
+            textvariable=self.distance_var)
+        self.distance_spin.grid(row=row, column=1, sticky="w", pady=3)
+        row += 1
+
+        ttk.Label(body, text="张数：").grid(row=row, column=0, sticky="w", pady=3)
+        self.frames_spin = ttk.Spinbox(
+            body, from_=2, to=20, increment=1, width=7,
+            textvariable=self.frames_var)
+        self.frames_spin.grid(row=row, column=1, sticky="w", pady=3)
+        row += 1
+
+        ttk.Label(body, text="平移方向：").grid(row=row, column=0, sticky="w", pady=3)
+        directions = ttk.Frame(body)
+        directions.grid(row=row, column=1, sticky="w", pady=3)
+        self.left_radio = ttk.Radiobutton(
+            directions, text="向左", variable=self.direction_var, value="left")
+        self.left_radio.pack(side="left")
+        self.right_radio = ttk.Radiobutton(
+            directions, text="向右", variable=self.direction_var, value="right")
+        self.right_radio.pack(side="left", padx=(16, 0))
+        row += 1
+
+        ttk.Label(body, text="平移速度（m/s）：").grid(row=row, column=0, sticky="w", pady=3)
+        self.speed_spin = ttk.Spinbox(
+            body, from_=0.02, to=0.10, increment=0.01, width=7,
+            textvariable=self.speed_var)
+        self.speed_spin.grid(row=row, column=1, sticky="w", pady=3)
+        row += 1
+
+        ttk.Label(body, text="停稳时间（秒）：").grid(row=row, column=0, sticky="w", pady=3)
+        self.settle_spin = ttk.Spinbox(
+            body, from_=0.1, to=3.0, increment=0.1, width=7,
+            textvariable=self.settle_var)
+        self.settle_spin.grid(row=row, column=1, sticky="w", pady=3)
+        row += 1
+
+        ttk.Label(body, text="手动抽帧（fps）：").grid(row=row, column=0, sticky="w", pady=3)
+        self.fps_spin = ttk.Spinbox(
+            body, from_=1, to=10, increment=1, width=7,
+            textvariable=self.fps_var)
+        self.fps_spin.grid(row=row, column=1, sticky="w", pady=3)
+        row += 1
+
+        ttk.Checkbutton(body, text="采集后自动拼接",
+                        variable=self.auto_stitch_var).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        row += 1
+        ttk.Checkbutton(body, text="保存扫掠视频 sweep.avi",
+                        variable=self.record_video_var).grid(
+            row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+
+        ttk.Label(body, textvariable=self.summary_var, foreground="#0066aa").grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        row += 1
+        ttk.Label(body, textvariable=self.error_var, foreground="#b00020").grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        row += 1
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=row, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(buttons, text="取消", command=self._cancel).pack(side="right")
+        ttk.Button(buttons, text="开始扫描", command=self._ok).pack(
+            side="right", padx=(0, 8))
+
+        for var in (self.mode_var, self.label_var, self.frames_var,
+                    self.distance_var, self.direction_var, self.speed_var,
+                    self.settle_var, self.fps_var):
+            var.trace_add("write", lambda *args: self._update_state())
+        self._update_state()
+        self.update_idletasks()
+        self._center()
+
+    def _center(self) -> None:
+        self.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        x = max(0, (self.winfo_screenwidth() - width) // 2)
+        y = max(0, (self.winfo_screenheight() - height) // 3)
+        self.geometry("+{}+{}".format(x, y))
+
+    def _collect(self, validate: bool = True):
+        mode = self.mode_var.get()
+        settings = scan_module.ScanSettings(
+            mode=mode,
+            frames=int(self.frames_var.get()) if mode == "strafe" else 5,
+            distance_m=float(self.distance_var.get()) if mode == "strafe" else 0.0,
+            direction=self.direction_var.get(),
+            speed=float(self.speed_var.get()),
+            settle=float(self.settle_var.get()),
+            label=self.label_var.get(),
+            auto_stitch=bool(self.auto_stitch_var.get()),
+            record_video=bool(self.record_video_var.get()),
+            fps=float(self.fps_var.get()),
+            quality=self._quality,
+        )
+        if validate:
+            settings.validate()
+        return settings
+
+    def _update_state(self) -> None:
+        automatic = self.mode_var.get() == "strafe"
+        for widget in (self.frames_spin, self.distance_spin, self.speed_spin,
+                       self.settle_spin, self.left_radio, self.right_radio):
+            widget.configure(state="normal" if automatic else "disabled")
+        self.fps_spin.configure(state="normal" if not automatic else "disabled")
+        try:
+            settings = self._collect(validate=False)
+            if automatic:
+                text = settings.summary()
+            else:
+                text = "手动录制，抽帧 {:.0f} fps；自己移动，停止后拼接".format(
+                    settings.fps)
+            self.summary_var.set(text)
+        except Exception:
+            self.summary_var.set("请检查参数")
+
+    def _ok(self) -> None:
+        try:
+            settings = self._collect(validate=True)
+        except Exception as error:
+            self.error_var.set(str(error))
+            return
+        self.result = settings
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
+class ScanApp(object):
+    """区域扫描窗口：预览、开始/停止、拼接结果。"""
+
+    def __init__(self, root, camera, output_root, settings,
+                 chassis=None, stitch_max_width: int = 1600,
+                 model_dir=None, conf: float = 0.25, imgsz: int = 640,
+                 infer_device: str = "auto"):
+        self.root = root
+        self.camera = camera
+        self.output_root = Path(output_root)
+        self.settings = settings
+        self.chassis = chassis
+        self.stitch_max_width = int(stitch_max_width)
+        self.model_dir = (Path(model_dir).expanduser() if model_dir
+                          else Path.home() / "AI视觉")
+        self.conf = float(conf)
+        self.imgsz = int(imgsz)
+        self.infer_device = infer_device
+
+        self._photo = None
+        self._pano_bgr = None
+        self._annotated_bgr = None
+        self._annotated_path = None
+        self._pano_result = None
+        self._detect_model = None
+        self._detect_thread = None
+        self._detect_events = queue.Queue()
+        self._detection_boxes = []
+        self._detection_names = {}
+        self._session = None
+        self._job = None
+        self._after_id = None
+        self._closed = False
+        self._close_when_done = False
+        self._fps = 0.0
+        self._fps_count = 0
+        self._fps_start = time.monotonic()
+        self._font_path = find_cjk_font() if PIL_AVAILABLE else None
+        self._font_cache = {}
+        self._bold_font = tkfont.Font(root=root, size=12, weight="bold")
+
+        self.status_var = tk.StringVar(value=settings.summary())
+        self.progress_var = tk.StringVar(value="")
+        self.fps_var = tk.StringVar(value="预览：--")
+        self.mode_var = tk.StringVar(
+            value="自动平移" if settings.mode == "strafe" else "手动录制")
+
+        self._build_ui()
+        self._bind_keys()
+        self.root.title("区域扫描 - {}".format(self.mode_var.get()))
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.minsize(560, 420)
+        self._tick()
+
+    def _build_ui(self) -> None:
+        top = ttk.Frame(self.root, padding=(14, 12, 14, 4))
+        top.pack(fill="x")
+        ttk.Label(top, text="区域扫描：").pack(side="left")
+        ttk.Label(top, textvariable=self.mode_var,
+                  font=self._bold_font).pack(side="left")
+        self.start_button = ttk.Button(
+            top, text=("开始扫描" if self.settings.mode == "strafe" else "开始录制"),
+            command=self.start_scan)
+        self.start_button.pack(side="left", padx=(14, 0))
+        self.stop_button = ttk.Button(
+            top, text="停止", command=self.stop_scan, state="disabled")
+        self.stop_button.pack(side="left", padx=(6, 0))
+        self.detect_button = ttk.Button(
+            top, text="检测全景", state="disabled",
+            command=self.detect_panorama)
+        self.detect_button.pack(side="right")
+        self.crop_button = ttk.Button(
+            top, text="保存裁剪 (C)", state="disabled",
+            command=self.save_crops)
+        self.crop_button.pack(side="right", padx=(0, 6))
+        self.view_button = ttk.Button(
+            top, text="查看全景", state="disabled", command=self.view_panorama)
+        self.view_button.pack(side="right", padx=(0, 6))
+        self.open_button = ttk.Button(
+            top, text="打开目录", state="disabled", command=self.open_folder)
+        self.open_button.pack(side="right", padx=(0, 6))
+
+        self.preview = tk.Label(
+            self.root, bg="#141414", fg="#bbbbbb",
+            text="正在打开摄像头…", takefocus=True,
+        )
+        self.preview.pack(fill="both", expand=True, padx=14, pady=6)
+        self.preview.bind("<Button-1>", lambda event: self.preview.focus_set())
+
+        bottom = ttk.Frame(self.root, padding=(14, 0, 14, 10))
+        bottom.pack(fill="x")
+        self.status_label = ttk.Label(
+            bottom, textvariable=self.status_var, foreground="#444444")
+        self.status_label.pack(side="left")
+        ttk.Label(bottom, textvariable=self.fps_var,
+                  foreground="#666666").pack(side="right")
+        self.progress = ttk.Progressbar(
+            self.root, orient="horizontal", mode="determinate", maximum=100)
+        self.progress.pack(fill="x", padx=14, pady=(0, 8))
+        ttk.Label(self.root, textvariable=self.progress_var,
+                  foreground="#0066aa", padding=(14, 0, 14, 8)).pack(fill="x")
+
+    def _bind_keys(self) -> None:
+        self.root.bind("<KeyPress-c>", self._on_key_c)
+        self.root.bind("<KeyPress-C>", self._on_key_c)
+        self.root.bind("<Escape>", lambda event: self.close())
+
+    def _focus_is_text(self) -> bool:
+        widget = self.root.focus_get()
+        return isinstance(widget, (tk.Entry, tk.Text, tk.Spinbox,
+                                   ttk.Entry, ttk.Spinbox))
+
+    def _on_key_c(self, event=None):
+        if self._focus_is_text():
+            return None
+        self.save_crops()
+        return "break"
+
+    # -- 预览 ---------------------------------------------------------
+    def _tick(self) -> None:
+        if self._closed:
+            return
+        if self._job is not None:
+            self._poll_job()
+        if self._closed:
+            return
+        self._poll_detection()
+        if self._job is None or not self._job.running:
+            if self._pano_bgr is None:
+                frame = self.camera.read()
+                if frame is not None:
+                    self._render_frame(frame)
+                    self._count_fps()
+
+        try:
+            self._after_id = self.root.after(30, self._tick)
+        except tk.TclError:
+            self._after_id = None
+
+    def _count_fps(self) -> None:
+        self._fps_count += 1
+        now = time.monotonic()
+        elapsed = now - self._fps_start
+        if elapsed >= 0.5:
+            self._fps = self._fps_count / elapsed
+            self._fps_count = 0
+            self._fps_start = now
+            self.fps_var.set("预览：{:.1f} fps".format(self._fps))
+
+    def _render_frame(self, frame, header: Optional[str] = None) -> None:
+        if not PIL_AVAILABLE:
+            return
+        height, width = frame.shape[:2]
+        scale = min(1.0, float(MAX_PREVIEW_W) / width, float(MAX_PREVIEW_H) / height)
+        if scale < 1.0:
+            frame = cv2.resize(
+                frame, (max(1, int(width * scale)), max(1, int(height * scale))),
+                interpolation=cv2.INTER_AREA)
+        try:
+            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(image)
+            font = self._get_font(20)
+            if header is None:
+                header = "区域扫描 · {}".format(self.mode_var.get())
+            if font is not None:
+                bbox = draw.textbbox((0, 0), header, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                draw.rectangle(
+                    [10, 10, min(image.size[0], 10 + text_width + 18),
+                     min(image.size[1], 10 + text_height + 18)],
+                    fill=(0, 0, 0))
+                draw.text((19, 19 - bbox[1]), header, font=font,
+                          fill=(255, 255, 255))
+            photo = ImageTk.PhotoImage(image)
+        except Exception:
+            return
+        self._photo = photo
+        self.preview.configure(image=photo, text="")
+
+    def _get_font(self, size: int):
+        if size in self._font_cache:
+            return self._font_cache[size]
+        font = None
+        if self._font_path:
+            try:
+                font = ImageFont.truetype(self._font_path, size)
+            except Exception:
+                self._font_path = None
+        if font is None:
+            try:
+                font = ImageFont.load_default()
+            except Exception:
+                font = None
+        self._font_cache[size] = font
+        return font
+
+    # -- 采集 ---------------------------------------------------------
+    def start_scan(self) -> None:
+        if self._job is not None and self._job.running:
+            return
+        if self._detect_thread is not None and self._detect_thread.is_alive():
+            self._set_status("正在检测全景，请等检测完成", error=True)
+            return
+        if not SCAN_MODULE_AVAILABLE:
+            messagebox.showerror("区域扫描不可用", "缺少 scan.py 模块", parent=self.root)
+            return
+        if self.settings.mode == "strafe" and self.chassis is None:
+            messagebox.showerror("没有底盘", "自动平移需要先连接底盘", parent=self.root)
+            return
+        try:
+            session = scan_module.ScanSession(
+                self.output_root, self.settings,
+                camera_info={"device": "camera", "width": self.camera.frame_size[0],
+                             "height": self.camera.frame_size[1]})
+        except Exception as error:
+            messagebox.showerror("创建扫描目录失败", str(error), parent=self.root)
+            return
+
+        self._session = session
+        self._pano_bgr = None
+        self._annotated_bgr = None
+        self._annotated_path = None
+        self._pano_result = None
+        self._detection_boxes = []
+        self._detection_names = {}
+        self.view_button.configure(state="disabled")
+        self.crop_button.configure(state="disabled")
+        self.detect_button.configure(state="disabled")
+        self.open_button.configure(state="normal")
+        self.start_button.configure(state="disabled")
+        self.stop_button.configure(state="normal")
+        self.progress.configure(mode="determinate", maximum=100, value=0)
+        self.progress_var.set("")
+
+        self._job = scan_module.ScanJob(
+            self.camera, session, self.settings, chassis=self.chassis,
+            stitch_max_width=self.stitch_max_width)
+        self._job.start()
+        self._set_status("开始采集…")
+
+    def stop_scan(self) -> None:
+        if self._job is not None and self._job.running:
+            self._set_status("正在停止…")
+            self._job.stop()
+            self.stop_button.configure(state="disabled")
+
+    def _poll_job(self) -> None:
+        if self._job is None:
+            return
+        for event in self._job.poll():
+            if event.kind in ("preview", "frame"):
+                if event.frame is not None:
+                    header = None
+                    if event.kind == "frame" and event.total:
+                        header = "区域扫描 · 第 {}/{} 帧".format(
+                            event.index, event.total)
+                    self._render_frame(event.frame, header)
+            elif event.kind == "progress":
+                self.progress_var.set(event.message)
+                if event.total and event.total > 0:
+                    value = min(100.0, 100.0 * event.index / event.total)
+                    self.progress.configure(value=value)
+            elif event.kind == "status":
+                self._set_status(event.message)
+            elif event.kind == "error":
+                self._set_status(event.message, error=True)
+            elif event.kind == "done":
+                self._on_done(event.result)
+
+    def _poll_detection(self) -> None:
+        while True:
+            try:
+                event = self._detect_events.get_nowait()
+            except queue.Empty:
+                break
+            kind = event[0]
+            if kind == "progress":
+                done, total = event[1], event[2]
+                self._set_status("检测全景中：{}/{} 块".format(done, total))
+                if total:
+                    self.progress.configure(value=100.0 * done / total)
+            elif kind == "done":
+                _kind, result, annotated, path = event
+                self._detect_thread = None
+                self._annotated_bgr = annotated
+                self._annotated_path = path
+                self._detection_boxes = list(result.boxes)
+                self._detection_names = dict(result.names)
+                self.detect_button.configure(state="normal")
+                self.crop_button.configure(
+                    state="normal" if self._detection_boxes else "disabled")
+                self._render_frame(
+                    annotated, "检测结果：{} 个目标".format(len(result.boxes)))
+                self._set_status("检测完成：{} 个目标 → {}".format(
+                    len(result.boxes), display_path(path)))
+            elif kind == "error":
+                self._detect_thread = None
+                self.detect_button.configure(state="normal")
+                self._set_status("检测失败：{}".format(event[1]), error=True)
+
+    def _on_done(self, result) -> None:
+        job = self._job
+        self._job = None
+        if job is not None:
+            job.join(1.0)
+        self.stop_button.configure(state="disabled")
+        self.start_button.configure(state="normal")
+        self.progress.configure(value=100)
+        self._pano_result = result
+        if result is not None and getattr(result, "ok", False):
+            self._show_panorama(result)
+            self._set_status("拼接完成：{}x{}".format(result.width, result.height))
+        elif result is not None:
+            self._set_status("拼接失败：{}".format(result.message), error=True)
+        else:
+            self._set_status("采集结束（未拼接）")
+        if self._close_when_done:
+            self._destroy()
+
+    def _show_panorama(self, result) -> None:
+        if PIL_AVAILABLE and result.image is not None:
+            image = result.image
+        elif result.path is not None:
+            image = cv2.imread(str(result.path))
+        else:
+            image = None
+        if image is None:
+            return
+        self._pano_bgr = image
+        header = "全景 {}x{}".format(image.shape[1], image.shape[0])
+        self._render_frame(image, header)
+        self.view_button.configure(state="normal")
+        self.open_button.configure(state="normal")
+        if YOLO_RUNTIME_AVAILABLE:
+            self.detect_button.configure(state="normal")
+
+    # -- 其他 ---------------------------------------------------------
+    def _set_status(self, text: str, error: bool = False) -> None:
+        self.status_var.set(text)
+        self.status_label.configure(foreground="#b00020" if error else "#444444")
+
+    def open_folder(self) -> None:
+        if self._session is None:
+            return
+        self._open_path(self._session.directory)
+
+    def view_panorama(self) -> None:
+        if self._annotated_path is not None:
+            self._open_path(self._annotated_path)
+        elif self._pano_result is not None and self._pano_result.path is not None:
+            self._open_path(self._pano_result.path)
+
+    def save_crops(self) -> None:
+        if not self._detection_boxes or self._pano_bgr is None or self._session is None:
+            self._set_status("还没有可保存的检测裁剪图", error=True)
+            return
+        if not self._detect_model:
+            self._set_status("没有记录检测模型", error=True)
+            return
+        model_stem = sanitize_type(Path(self._detect_model).stem) or "model"
+        model_dir = self._session.directory / "裁剪" / model_stem
+        try:
+            count, _manifest = save_detection_crops(
+                self._pano_bgr, self._detection_boxes, self._detection_names,
+                model_dir, prefix=model_stem, source="panorama")
+        except Exception as error:
+            self._set_status("保存裁剪图失败：{}".format(error), error=True)
+            return
+        if count <= 0:
+            self._set_status("没有有效的检测框可保存", error=True)
+            return
+        self._set_status("已保存 {} 张裁剪图（按类别）→ {}".format(
+            count, display_path(model_dir)))
+
+    def detect_panorama(self) -> None:
+        if self._pano_bgr is None or self._session is None:
+            self._set_status("还没有可检测的全景", error=True)
+            return
+        if self._detect_thread is not None and self._detect_thread.is_alive():
+            return
+        if not YOLO_RUNTIME_AVAILABLE:
+            self._set_status("没有可用的 YOLO 环境", error=True)
+            return
+        dialog = ModelDialog(
+            self.root, self.model_dir,
+            initial_model=self._detect_model,
+            title="选择全景检测模型")
+        self.root.wait_window(dialog)
+        if not dialog.result:
+            return
+        self._detect_model = dialog.result
+        self._detection_boxes = []
+        self._detection_names = {}
+        self.detect_button.configure(state="disabled")
+        self.crop_button.configure(state="disabled")
+        self._set_status("正在检测全景（分块推理）…")
+        self._detect_thread = threading.Thread(
+            target=self._run_detection, args=(dialog.result,), daemon=True)
+        self._detect_thread.start()
+
+    def _run_detection(self, model_path) -> None:
+        try:
+            if not YOLO_RUNTIME_AVAILABLE or yolo_detect is None:
+                raise RuntimeError("缺少 yolo_detect / ultralytics")
+            result = yolo_detect.detect_image_tiled(
+                self._pano_bgr, model_path,
+                conf=self.conf, imgsz=self.imgsz,
+                device_pref=self.infer_device,
+                tile=640, overlap=0.2,
+                progress=lambda done, total: self._detect_events.put(
+                    ("progress", done, total)))
+            if not result.ok:
+                raise RuntimeError(result.message)
+            annotated = annotate_detections(
+                self._pano_bgr, result.boxes, result.names)
+            path = self._session.directory / "panorama_detected.jpg"
+            if not cv2.imwrite(str(path), annotated,
+                               [int(cv2.IMWRITE_JPEG_QUALITY), 92]):
+                raise RuntimeError("写入检测结果失败")
+            detections = []
+            for x1, y1, x2, y2, score, class_id in result.boxes:
+                detections.append({
+                    "class_id": int(class_id),
+                    "name": result.names.get(int(class_id), str(class_id)),
+                    "conf": round(float(score), 4),
+                    "box": [round(float(x1), 1), round(float(y1), 1),
+                            round(float(x2), 1), round(float(y2), 1)],
+                })
+            self._session.set_detections(detections, path)
+            self._detect_events.put(("done", result, annotated, path))
+        except Exception as error:
+            self._detect_events.put(("error", str(error)))
+
+    def _open_path(self, path: Path) -> None:
+        try:
+            subprocess.Popen(["xdg-open", str(path)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as error:
+            self._set_status("无法打开：{}".format(error), error=True)
+
+    def close(self) -> None:
+        if self._closed or self._close_when_done:
+            return
+        if self._job is not None and self._job.running:
+            if not messagebox.askyesno(
+                    "正在扫描", "扫描还没结束，确定停止并退出吗？", parent=self.root):
+                return
+            self._close_when_done = True
+            self._job.stop()
+            self._set_status("正在停止，稍后退出…")
+            return
+        self._destroy()
+
+    def _destroy(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._after_id is not None:
+            try:
+                self.root.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+        if self._job is not None:
+            self._job.stop()
+            self._job.join(2.0)
+            self._job = None
+        if self._session is not None:
+            self._session.close()
+        if self.chassis is not None:
+            try:
+                self.chassis.close()
+            except Exception:
+                pass
+        self.camera.release()
+        self.root.destroy()
+
+
 # ---------------------------------------------------------------------------
 # 图形界面启动流程
 # ---------------------------------------------------------------------------
 
-def run_gui(args, output_root: Path) -> int:
-    root = tk.Tk()
-    root.withdraw()
-    root.title(APP_TITLE)
+def _destroy_quietly(widget) -> None:
+    try:
+        if widget is not None and widget.winfo_exists():
+            widget.destroy()
+    except Exception:
+        pass
 
+
+def _load_detector_gui(root, model_path, args):
+    """显示加载提示并创建检测器；失败时弹窗并返回 None。"""
+    loading = tk.Toplevel(root)
+    loading.title("加载模型")
+    loading.resizable(False, False)
+    ttk.Label(
+        loading,
+        text="正在加载模型：\n{}\n请稍候…".format(model_path.name),
+        justify="center",
+    ).pack(padx=26, pady=20)
+    loading.update()
+    try:
+        detector = yolo_detect.YoloDetector(
+            model_path, args.infer_device, args.imgsz, args.conf)
+    except yolo_detect.ModelError as error:
+        _destroy_quietly(loading)
+        messagebox.showerror("模型加载失败", str(error))
+        return None
+    _destroy_quietly(loading)
+    return detector
+
+
+def run_gui_detect(args, output_root: Path, root) -> int:
+    if not YOLO_MODULE_AVAILABLE:
+        messagebox.showerror(
+            "模型测试不可用",
+            "缺少 yolo_detect.py 模块，请确认它和 capture_photos.py 在同一个目录。")
+        root.destroy()
+        return 1
+    if not yolo_detect.ultralytics_available():
+        messagebox.showerror(
+            "模型测试不可用",
+            "当前 Python 没有安装 ultralytics。\n可执行：pip3 install ultralytics")
+        root.destroy()
+        return 1
+
+    model_dir = Path(args.model_dir).expanduser()
+    model_path = None
+    if args.model:
+        model_path = yolo_detect.resolve_model_path(args.model, model_dir)
+        if model_path is None:
+            messagebox.showwarning(
+                "找不到模型",
+                "指定的模型不存在：{}\n请从列表里重新选择。".format(args.model))
+
+    detector = None
+    if model_path is not None:
+        detector = _load_detector_gui(root, model_path, args)
+
+    while detector is None:
+        dialog = ModelDialog(root, model_dir, initial_model=model_path)
+        root.wait_window(dialog)
+        if not dialog.result:
+            root.destroy()
+            print("[photo_capture] 已取消")
+            return 0
+        model_path = dialog.result
+        detector = _load_detector_gui(root, model_path, args)
+
+    camera = Camera(
+        parse_camera_source(args.device),
+        width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+    )
+    try:
+        camera.open()
+    except CameraError as error:
+        detector.close()
+        messagebox.showerror("摄像头不可用", str(error))
+        root.destroy()
+        return 1
+
+    print("[photo_capture] 模型测试模式")
+    print("[photo_capture] 模型：{}".format(model_path))
+    print("[photo_capture] 设备：{}，imgsz={}，conf={:.2f}，类别 {} 类".format(
+        yolo_detect.device_label(detector.device), detector.imgsz, detector.conf,
+        detector.class_count))
+    print("[photo_capture] 操作：M 换模型，S 保存当前帧，Esc 退出")
+
+    try:
+        app = DetectApp(
+            root, camera, detector, model_path, output_root, model_dir,
+            infer_device=args.infer_device, imgsz=args.imgsz,
+        )
+        root.deiconify()
+        root.lift()
+        app.preview.focus_set()
+        root.mainloop()
+    finally:
+        camera.release()
+        detector.close()
+    return 0
+
+
+def run_gui_scan(args, output_root: Path, root) -> int:
+    if not SCAN_MODULE_AVAILABLE:
+        messagebox.showerror(
+            "区域扫描不可用",
+            "缺少 scan.py / stitch.py 模块，请确认它们和 capture_photos.py 在同一目录。")
+        root.destroy()
+        return 1
+
+    defaults = scan_module.ScanSettings(
+        mode=args.scan_mode,
+        frames=args.scan_frames,
+        distance_m=args.scan_distance,
+        direction=args.scan_direction,
+        speed=args.scan_speed,
+        settle=args.scan_settle,
+        label=args.scan_label,
+        auto_stitch=args.scan_stitch,
+        record_video=args.scan_record_video,
+        feedback=args.scan_feedback,
+        clearance=args.scan_clearance,
+        fps=args.scan_fps,
+        quality=args.quality,
+    )
+    dialog = ScanDialog(root, defaults)
+    root.wait_window(dialog)
+    if not dialog.result:
+        root.destroy()
+        print("[photo_capture] 已取消")
+        return 0
+    settings = dialog.result
+
+    camera = Camera(
+        parse_camera_source(args.device),
+        width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+    )
+    try:
+        camera.open()
+    except CameraError as error:
+        messagebox.showerror("摄像头不可用", str(error))
+        root.destroy()
+        return 1
+
+    chassis = None
+    if settings.mode == "strafe":
+        try:
+            import chassis as chassis_module
+            chassis = chassis_module.ChassisController(
+                feedback=args.scan_feedback,
+                clearance=args.scan_clearance,
+                force=args.force,
+                dry_run=args.scan_dry_run,
+            )
+            chassis.connect()
+        except Exception as error:
+            if chassis is not None:
+                try:
+                    chassis.close()
+                except Exception:
+                    pass
+            camera.release()
+            messagebox.showerror("底盘不可用", str(error))
+            root.destroy()
+            return 1
+
+    print("[photo_capture] 区域扫描：{}".format(settings.summary()))
+    print("[photo_capture] 输出目录：{}".format(
+        display_path(Path(output_root) / "区域扫描")))
+
+    try:
+        app = ScanApp(
+            root, camera, output_root, settings, chassis=chassis,
+            stitch_max_width=args.stitch_max_width,
+            model_dir=args.model_dir, conf=args.conf,
+            imgsz=args.imgsz, infer_device=args.infer_device)
+        root.deiconify()
+        root.lift()
+        app.preview.focus_set()
+        root.mainloop()
+    finally:
+        camera.release()
+        if chassis is not None:
+            try:
+                chassis.close()
+            except Exception:
+                pass
+    return 0
+
+
+def run_gui_photo(args, output_root: Path, root) -> int:
     initial_type = args.type or ""
     while True:
         dialog = AskTypeDialog(
@@ -852,6 +2572,27 @@ def run_gui(args, output_root: Path) -> int:
         camera.release()
     return 0
 
+
+def run_gui(args, output_root: Path) -> int:
+    root = tk.Tk()
+    root.withdraw()
+    root.title(APP_TITLE)
+
+    mode = args.mode
+    if mode == "ask":
+        dialog = ModeDialog(root, "{} - 选择模式".format(APP_TITLE))
+        root.wait_window(dialog)
+        mode = dialog.result
+        if not mode:
+            root.destroy()
+            print("[photo_capture] 已取消")
+            return 0
+
+    if mode == MODE_DETECT:
+        return run_gui_detect(args, output_root, root)
+    if mode == MODE_SCAN:
+        return run_gui_scan(args, output_root, root)
+    return run_gui_photo(args, output_root, root)
 
 # ---------------------------------------------------------------------------
 # 命令行模式
@@ -931,9 +2672,375 @@ def print_cli_help() -> None:
     print("  q               退出")
 
 
+def prompt_model_cli(model_dir: Path) -> Path:
+    models = yolo_detect.list_model_files(model_dir)
+    if models:
+        print("可用模型（{}）：".format(display_path(model_dir)))
+        for index, path in enumerate(models, 1):
+            print("  {}) {}  ({})".format(
+                index, path.name, yolo_detect.human_size(path)))
+    elif not Path(model_dir).is_dir():
+        print("模型目录不存在：{}".format(display_path(model_dir)))
+    while True:
+        raw = input("请选择模型序号或输入 .pt 路径：").strip()
+        if not raw:
+            print("不能为空，请重新输入")
+            continue
+        if raw.isdigit() and models:
+            index = int(raw)
+            if 1 <= index <= len(models):
+                return models[index - 1]
+            print("序号超出范围（1-{}）".format(len(models)))
+            continue
+        path = yolo_detect.resolve_model_path(raw, model_dir)
+        if path is not None:
+            return path
+        print("找不到模型：{}".format(raw))
+
+
+def run_detect_cli(args, output_root: Path) -> int:
+    if not YOLO_MODULE_AVAILABLE:
+        print("[photo_capture] 缺少 yolo_detect.py 模块", file=sys.stderr)
+        return 1
+    if not yolo_detect.ultralytics_available():
+        print("[photo_capture] 未安装 ultralytics，请先 pip3 install ultralytics",
+              file=sys.stderr)
+        return 1
+
+    model_dir = Path(args.model_dir).expanduser()
+    model_path = None
+    if args.model:
+        model_path = yolo_detect.resolve_model_path(args.model, model_dir)
+        if model_path is None:
+            print("[photo_capture] 找不到模型：{}".format(args.model),
+                  file=sys.stderr)
+    if model_path is None:
+        try:
+            model_path = prompt_model_cli(model_dir)
+        except (EOFError, KeyboardInterrupt):
+            print("\n[photo_capture] 已取消")
+            return 0
+
+    try:
+        detector = yolo_detect.YoloDetector(
+            model_path, args.infer_device, args.imgsz, args.conf)
+    except yolo_detect.ModelError as error:
+        print("[photo_capture] {}".format(error), file=sys.stderr)
+        return 1
+
+    camera = Camera(
+        parse_camera_source(args.device),
+        width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+    )
+    try:
+        camera.open()
+    except CameraError as error:
+        detector.close()
+        print("[photo_capture] {}".format(error), file=sys.stderr)
+        return 1
+
+    width, height = camera.frame_size
+    print("[photo_capture] 模型测试模式（命令行）")
+    print("[photo_capture] 模型：{}（{} 类）".format(
+        model_path, detector.class_count))
+    print("[photo_capture] 设备：{}，imgsz={}，conf={:.2f}".format(
+        yolo_detect.device_label(detector.device), detector.imgsz, detector.conf))
+    print("[photo_capture] 摄像头画面：{}x{}；Ctrl+C 退出".format(width, height))
+
+    frames = 0
+    failures = 0
+    last_result_id = -1
+    result_count = 0
+    window_start = time.monotonic()
+    last_boxes = []
+    last_ms = 0.0
+    try:
+        while True:
+            frame = camera.read()
+            if frame is None:
+                failures += 1
+                if failures >= 20:
+                    print("[photo_capture] 摄像头没有画面，退出", file=sys.stderr)
+                    break
+                time.sleep(0.05)
+                continue
+            failures = 0
+            frames += 1
+            detector.submit(frame, frames)
+
+            latest = detector.latest()
+            if latest is not None and latest[0] != last_result_id:
+                last_result_id = latest[0]
+                result_count += 1
+                last_boxes = latest[1]
+                last_ms = latest[2]
+
+            now = time.monotonic()
+            if now - window_start >= 1.0:
+                elapsed = now - window_start
+                if result_count == 0:
+                    summary = "推理中…"
+                elif last_boxes:
+                    parts = []
+                    for _x1, _y1, _x2, _y2, conf, class_id in last_boxes[:6]:
+                        name = detector.names.get(class_id, str(class_id))
+                        parts.append("{} {:.2f}".format(name, conf))
+                    summary = "，".join(parts)
+                    if len(last_boxes) > 6:
+                        summary += " 等 {} 个".format(len(last_boxes))
+                else:
+                    summary = "无目标"
+                print("[{}] 推理 {:.1f} fps | {:d} ms | {}".format(
+                    datetime.now().strftime("%H:%M:%S"),
+                    result_count / elapsed if elapsed > 0 else 0.0,
+                    int(round(last_ms)), summary))
+                result_count = 0
+                window_start = now
+            time.sleep(0.01)
+    except KeyboardInterrupt:
+        print()
+    finally:
+        camera.release()
+        detector.close()
+
+    print("[photo_capture] 退出，共处理 {} 帧".format(frames))
+    return 0
+
+
+def run_scan_cli(args, output_root: Path) -> int:
+    if not SCAN_MODULE_AVAILABLE:
+        print("[photo_capture] 缺少 scan.py / stitch.py 模块", file=sys.stderr)
+        return 1
+    try:
+        settings = scan_module.ScanSettings(
+            mode=args.scan_mode,
+            frames=args.scan_frames,
+            distance_m=args.scan_distance,
+            direction=args.scan_direction,
+            speed=args.scan_speed,
+            settle=args.scan_settle,
+            label=args.scan_label,
+            auto_stitch=args.scan_stitch,
+            record_video=args.scan_record_video,
+            feedback=args.scan_feedback,
+            clearance=args.scan_clearance,
+            fps=args.scan_fps,
+            quality=args.quality,
+        ).validate()
+    except Exception as error:
+        print("[photo_capture] 参数错误：{}".format(error), file=sys.stderr)
+        return 1
+
+    camera = Camera(
+        parse_camera_source(args.device),
+        width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+    )
+    try:
+        camera.open()
+    except CameraError as error:
+        print("[photo_capture] {}".format(error), file=sys.stderr)
+        return 1
+
+    chassis = None
+    if settings.mode == "strafe":
+        try:
+            import chassis as chassis_module
+            chassis = chassis_module.ChassisController(
+                feedback=args.scan_feedback,
+                clearance=args.scan_clearance,
+                force=args.force,
+                dry_run=args.scan_dry_run,
+            )
+            chassis.connect()
+        except Exception as error:
+            camera.release()
+            if chassis is not None:
+                try:
+                    chassis.close()
+                except Exception:
+                    pass
+            print("[photo_capture] 底盘不可用：{}".format(error), file=sys.stderr)
+            return 1
+
+    try:
+        session = scan_module.ScanSession(
+            output_root, settings,
+            camera_info={"device": args.device, "width": camera.frame_size[0],
+                         "height": camera.frame_size[1]})
+    except Exception as error:
+        camera.release()
+        if chassis is not None:
+            chassis.close()
+        print("[photo_capture] 创建扫描目录失败：{}".format(error), file=sys.stderr)
+        return 1
+
+    print("[photo_capture] 区域扫描：{}".format(settings.summary()))
+    print("[photo_capture] 保存目录：{}".format(session.directory))
+    if settings.mode == "strafe" and not args.yes:
+        try:
+            input("回车开始自动平移（Ctrl+C 取消）…")
+        except (EOFError, KeyboardInterrupt):
+            print("\n[photo_capture] 已取消")
+            session.close()
+            camera.release()
+            if chassis is not None:
+                chassis.close()
+            return 0
+
+    job = scan_module.ScanJob(
+        camera, session, settings, chassis=chassis,
+        stitch_max_width=args.stitch_max_width)
+    job.start()
+    if settings.mode == "manual":
+        print("[photo_capture] 手动录制中：用遥控平移，按回车停止")
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            print()
+        job.stop()
+    else:
+        print("[photo_capture] 自动扫描中，Ctrl+C 可停止")
+
+    done = False
+    result = None
+    printed_progress = 0
+    try:
+        while not done:
+            try:
+                for event in job.poll():
+                    if event.kind == "status":
+                        print("[photo_capture] {}".format(event.message))
+                    elif event.kind == "error":
+                        print("[photo_capture] {}".format(event.message), file=sys.stderr)
+                    elif event.kind == "progress":
+                        if event.total and event.index > printed_progress:
+                            printed_progress = event.index
+                            print("[photo_capture] 已拍 {}/{}".format(
+                                event.index, event.total))
+                    elif event.kind == "done":
+                        done = True
+                        result = event.result
+            except KeyboardInterrupt:
+                print("\n[photo_capture] 正在停止…")
+                job.stop()
+                continue
+            if not done and not job.running:
+                time.sleep(0.05)
+                continue
+            if not done:
+                time.sleep(0.1)
+    except KeyboardInterrupt:
+        job.stop()
+        print("\n[photo_capture] 正在停止…")
+        while job.running:
+            for event in job.poll():
+                if event.kind == "done":
+                    result = event.result
+            time.sleep(0.1)
+        for event in job.poll():
+            if event.kind == "done":
+                result = event.result
+    finally:
+        job.stop()
+        job.join(3.0)
+        session.close()
+        camera.release()
+        if chassis is not None:
+            try:
+                chassis.close()
+            except Exception:
+                pass
+
+    print("[photo_capture] 采集帧数：{}".format(len(session.frame_paths)))
+    if result is not None:
+        if result.ok:
+            print("[photo_capture] 全景：{}（{}x{}，{}）".format(
+                result.path, result.width, result.height, result.method))
+        else:
+            print("[photo_capture] 拼接失败：{}".format(result.message), file=sys.stderr)
+    elif settings.auto_stitch:
+        if len(session.frame_paths) < 2:
+            print("[photo_capture] 有效帧不足 2 张，未拼接", file=sys.stderr)
+    if args.detect_panorama and result is not None and result.ok:
+        if not YOLO_RUNTIME_AVAILABLE:
+            print("[photo_capture] 没有 YOLO 环境，跳过全景检测", file=sys.stderr)
+        else:
+            model_path = None
+            if args.model:
+                model_path = yolo_detect.resolve_model_path(args.model, args.model_dir)
+            if model_path is None:
+                try:
+                    model_path = prompt_model_cli(Path(args.model_dir).expanduser())
+                except (EOFError, KeyboardInterrupt):
+                    model_path = None
+            if model_path is not None:
+                try:
+                    print("[photo_capture] 全景检测：{}".format(model_path))
+                    def progress(done, total):
+                        if done == total or done % 5 == 0:
+                            print("[photo_capture] 检测 {}/{} 块".format(done, total))
+                    det = yolo_detect.detect_image_tiled(
+                        result.image, model_path, conf=args.conf,
+                        imgsz=args.imgsz, device_pref=args.infer_device,
+                        tile=640, overlap=0.2, progress=progress)
+                    if not det.ok:
+                        print("[photo_capture] 检测失败：{}".format(det.message),
+                              file=sys.stderr)
+                    else:
+                        annotated = annotate_detections(
+                            result.image, det.boxes, det.names)
+                        out_path = session.directory / "panorama_detected.jpg"
+                        cv2.imwrite(str(out_path), annotated,
+                                    [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                        detections = [{
+                            "class_id": int(cid),
+                            "name": det.names.get(int(cid), str(cid)),
+                            "conf": round(float(score), 4),
+                            "box": [round(float(x1), 1), round(float(y1), 1),
+                                    round(float(x2), 1), round(float(y2), 1)],
+                        } for x1, y1, x2, y2, score, cid in det.boxes]
+                        session.set_detections(detections, out_path)
+                        print("[photo_capture] 检测到 {} 个目标：{}".format(
+                            len(det.boxes), display_path(out_path)))
+                except Exception as error:
+                    print("[photo_capture] 全景检测失败：{}".format(error),
+                          file=sys.stderr)
+
+    print("[photo_capture] 目录：{}".format(session.directory))
+    return 0 if session.frame_paths else 1
+
+
 def run_cli(args, output_root: Path) -> int:
     print("[photo_capture] 输出根目录：{}".format(display_path(output_root)))
     print("[photo_capture] 命令行模式（没有图形界面时使用）")
+
+    mode = args.mode
+    if mode == "ask":
+        print("启动模式：")
+        print("  1) 拍照模式")
+        print("  2) 模型测试模式")
+        print("  3) 区域扫描（平移拼图）")
+        while True:
+            try:
+                choice = input("请选择 [1/2]（默认 1）：").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n[photo_capture] 已取消")
+                return 0
+            if choice in ("", "1"):
+                mode = MODE_PHOTO
+                break
+            if choice == "2":
+                mode = MODE_DETECT
+                break
+            if choice == "3":
+                mode = MODE_SCAN
+                break
+            print("请输入 1 / 2 / 3")
+
+    if mode == MODE_DETECT:
+        return run_detect_cli(args, output_root)
+    if mode == MODE_SCAN:
+        return run_scan_cli(args, output_root)
 
     try:
         type_name = args.type or prompt_type_cli(output_root)
@@ -1027,8 +3134,11 @@ def run_cli(args, output_root: Path) -> int:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="调用本机摄像头手动拍照：按类型分文件夹保存，可设置一次连拍张数。",
+        description="调用本机摄像头拍照，或加载 YOLO 模型做实时检测。",
     )
+    parser.add_argument("--mode", choices=("ask", "photo", "detect", "scan"),
+                        default="ask",
+                        help="启动模式：ask 每次询问，photo 拍照，detect 模型测试，scan 区域扫描")
     parser.add_argument("-d", "--output-dir", default=str(DEFAULT_OUTPUT_DIR),
                         help="照片根目录（默认：~/Pictures/photo_capture）")
     parser.add_argument("-t", "--type", default=None,
@@ -1037,6 +3147,17 @@ def parse_args(argv=None):
                         help="一次连拍张数，1-{}（默认 1）".format(MAX_BURST))
     parser.add_argument("--device", default="0",
                         help="摄像头编号 / 设备路径 / 视频文件（默认 0，即 /dev/video0）")
+    parser.add_argument("--model", default=None,
+                        help="YOLO 权重路径或文件名；模型测试模式不填则启动时选择")
+    parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR),
+                        help="模型目录（默认：~/AI视觉）")
+    parser.add_argument("--conf", type=float, default=0.25,
+                        help="检测置信度阈值 0.01-0.99（默认 0.25）")
+    parser.add_argument("--imgsz", type=int, default=640,
+                        help="推理输入尺寸（默认 640；CPU 上可用 416 提速）")
+    parser.add_argument("--infer-device", choices=("auto", "cpu", "cuda"),
+                        default="auto",
+                        help="推理设备（默认 auto：有 CUDA 用 GPU，否则 CPU）")
     parser.add_argument("--width", type=int, default=0, help="采集宽度，0 表示用摄像头默认值")
     parser.add_argument("--height", type=int, default=0, help="采集高度，0 表示用摄像头默认值")
     parser.add_argument("--fps", type=float, default=0, help="采集帧率，0 表示用摄像头默认值")
@@ -1050,6 +3171,43 @@ def parse_args(argv=None):
                         help="水平镜像（自拍用，预览和保存都镜像）")
     parser.add_argument("--no-gui", "--headless", dest="no_gui", action="store_true",
                         help="不打开预览窗口，用命令行交互")
+
+    # ---- 区域扫描（平移拼图） ----
+    parser.add_argument("--scan-mode", choices=("strafe", "manual"), default="strafe",
+                        help="区域扫描方式：strafe 自动平移（默认），manual 手动录制")
+    parser.add_argument("--scan-frames", type=int, default=5,
+                        help="平移扫描总帧数（默认 5）")
+    parser.add_argument("--scan-distance", type=float, default=1.0,
+                        help="平移总距离，米（默认 1.0）")
+    parser.add_argument("--scan-direction", choices=("left", "right"), default="left",
+                        help="平移方向（默认 left）")
+    parser.add_argument("--scan-speed", type=float, default=0.06,
+                        help="平移速度 m/s（默认 0.06）")
+    parser.add_argument("--scan-settle", type=float, default=0.5,
+                        help="每步停稳时间秒（默认 0.5）")
+    parser.add_argument("--scan-fps", type=float, default=3.0,
+                        help="手动录制抽帧帧率（默认 3）")
+    parser.add_argument("--scan-label", default="",
+                        help="区域名称（默认时间戳）")
+    parser.add_argument("--scan-feedback", choices=("auto", "odom", "time"),
+                        default="auto",
+                        help="平移距离反馈：auto / odom / time（默认 auto）")
+    parser.add_argument("--scan-clearance", type=float, default=0.25,
+                        help="平移前雷达净空，米；0 关闭（默认 0.25）")
+    parser.add_argument("--stitch-max-width", type=int, default=1600,
+                        help="拼接时每帧最大宽度（默认 1600）")
+    parser.add_argument("--scan-record-video", action="store_true",
+                        help="同时保存 sweep.avi")
+    parser.add_argument("--no-stitch", dest="scan_stitch", action="store_false",
+                        help="只采集，不自动拼接")
+    parser.add_argument("--scan-dry-run", action="store_true",
+                        help="区域扫描干跑：不连接 ROS、不产生真实运动（测试用）")
+    parser.add_argument("--detect-panorama", action="store_true",
+                        help="区域扫描拼接完成后用 YOLO 分块检测全景")
+    parser.add_argument("--yes", action="store_true",
+                        help="命令行自动扫描不再询问确认")
+    parser.add_argument("--force", action="store_true",
+                        help="忽略 /cmd_vel 上其他发布者的冲突警告")
     return parser.parse_args(argv)
 
 
