@@ -6,9 +6,10 @@
   * 启动时询问本次要拍的照片类型，照片保存到 <输出目录>/<类型>/ 下；
   * 一次拍照可以连拍 N 张（N 随时可改），也可以单张拍；
   * 运行中随时可以切换类型，换类型后自动建对应的文件夹；
-  * 启动时可以选择「拍照模式」「模型测试模式」或「区域扫描模式」；
+  * 启动时可以选择「拍照模式」「模型测试模式」「区域扫描模式」或「仪表识别模式」；
     模型测试模式会加载 ~/AI视觉 下的 .pt 权重，实时画框显示识别结果；
     区域扫描模式控制麦轮底盘横向平移，逐帧拍摄并拼成横向大图；
+    仪表识别模式加载 Pose.pt，识别温度/湿度表并计算指针读数；
   * 有桌面环境时用 tkinter 做预览窗口（OpenCV 只负责读摄像头和写图片），
     没有图形界面时自动退化为命令行交互模式。
 
@@ -28,10 +29,17 @@
   Esc          停止并退出
   拼接完成后可点「检测全景」做分块 YOLO
 
+仪表识别模式（图形界面）：
+  M            更换 Pose 模型
+  S            保存当前帧（带关键点/读数）
+  R            保存当前读数（JSONL）
+  Esc          退出
+
 命令行模式（--no-gui）：
   拍照模式：回车拍照，t 换类型，n 改张数，q 退出
   模型测试：实时打印检测结果，Ctrl+C 退出
   区域扫描：自动平移或手动录制，Ctrl+C/回车停止并拼接
+  仪表识别：实时打印温度/湿度表读数，Ctrl+C 退出
 """
 
 import argparse
@@ -71,6 +79,14 @@ except Exception:  # pragma: no cover - 取决于运行环境
     scan_module = None
     SCAN_MODULE_AVAILABLE = False
 
+try:  # 仪表 Pose 识别模块；缺失时只影响仪表模式
+    import gauge as gauge_module
+
+    GAUGE_MODULE_AVAILABLE = True
+except Exception:  # pragma: no cover - 取决于运行环境
+    gauge_module = None
+    GAUGE_MODULE_AVAILABLE = False
+
 # find_spec 只查包在不在，不真正 import，启动不会被拖慢
 YOLO_RUNTIME_AVAILABLE = bool(
     YOLO_MODULE_AVAILABLE and yolo_detect.ultralytics_available())
@@ -105,9 +121,11 @@ MAX_PREVIEW_H = 720
 MAX_BURST = 99
 MAX_TYPE_LEN = 40
 DEFAULT_MODEL_DIR = Path.home() / "AI视觉"
+DEFAULT_POSE_MODEL = DEFAULT_MODEL_DIR / "Pose.pt"
 MODE_PHOTO = "photo"
 MODE_DETECT = "detect"
 MODE_SCAN = "scan"
+MODE_GAUGE = "gauge"
 
 CJK_FONT_CANDIDATES = (
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -612,7 +630,7 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         ttk.Label(body, text="请选择启动模式", font=self._title_font).pack(anchor="w")
         ttk.Label(
             body,
-            text="拍照采集训练照片；模型测试做实时 YOLO 检测；区域扫描用平移拼出大图。",
+            text="拍照采集训练照片；模型测试做实时 YOLO 检测；区域扫描用平移拼图；仪表识别读温度/湿度表。",
             foreground="#666666",
             font=self._sub_font,
         ).pack(anchor="w", pady=(2, 18))
@@ -648,16 +666,30 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
                 relief="groove", bd=2, cursor="hand2",
                 command=lambda: self._choose(MODE_SCAN),
             )
-            self.scan_button.pack(side="left")
+            self.scan_button.pack(side="left", padx=(0, 10))
         else:
             ttk.Label(
                 buttons, text="区域扫描不可用\n（缺少 scan.py）",
+                justify="center", foreground="#b00020", width=16,
+            ).pack(side="left", padx=(0, 10))
+
+        if GAUGE_MODULE_AVAILABLE and YOLO_RUNTIME_AVAILABLE:
+            self.gauge_button = tk.Button(
+                buttons, text="仪表识别\n\nPose 读表计",
+                width=14, height=4, justify="center", font=self._button_font,
+                relief="groove", bd=2, cursor="hand2",
+                command=lambda: self._choose(MODE_GAUGE),
+            )
+            self.gauge_button.pack(side="left")
+        else:
+            ttk.Label(
+                buttons, text="仪表识别不可用\n（缺少 gauge.py/ultralytics）",
                 justify="center", foreground="#b00020", width=16,
             ).pack(side="left")
 
         ttk.Label(
             body,
-            text="提示：按数字键 1 / 2 / 3 也可以选择，Esc 取消。",
+            text="提示：按数字键 1 / 2 / 3 / 4 也可以选择，Esc 取消。",
             foreground="#888888",
             font=self._sub_font,
         ).pack(pady=(16, 0))
@@ -665,6 +697,7 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         self.bind("<KeyPress-1>", lambda event: self._choose(MODE_PHOTO))
         self.bind("<KeyPress-2>", lambda event: self._choose(MODE_DETECT))
         self.bind("<KeyPress-3>", lambda event: self._choose(MODE_SCAN))
+        self.bind("<KeyPress-4>", lambda event: self._choose(MODE_GAUGE))
         self.bind("<Escape>", lambda event: self._cancel())
         self.protocol("WM_DELETE_WINDOW", self._cancel)
 
@@ -684,6 +717,8 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         if mode == MODE_DETECT and not YOLO_RUNTIME_AVAILABLE:
             return
         if mode == MODE_SCAN and not SCAN_MODULE_AVAILABLE:
+            return
+        if mode == MODE_GAUGE and not (GAUGE_MODULE_AVAILABLE and YOLO_RUNTIME_AVAILABLE):
             return
         self.result = mode
         self.destroy()
@@ -2328,6 +2363,586 @@ class ScanApp(object):
         self.root.destroy()
 
 
+class GaugeSettingsDialog(tk.Toplevel if TK_AVAILABLE else object):
+    """仪表识别的量程/关键点设置。"""
+
+    def __init__(self, parent, defaults,
+                 title: str = "仪表识别设置"):
+        if not TK_AVAILABLE:
+            raise RuntimeError("tkinter 不可用")
+        if not GAUGE_MODULE_AVAILABLE:
+            raise RuntimeError("gauge 模块不可用")
+        super().__init__(parent)
+        self.result = None
+        self.title(title)
+        self.resizable(False, False)
+        try:
+            if parent.winfo_viewable():
+                self.transient(parent)
+        except tk.TclError:
+            pass
+
+        self._title_font = tkfont.Font(root=self, size=14, weight="bold")
+        self._sub_font = tkfont.Font(root=self, size=10)
+        self._imgsz = int(getattr(defaults, "imgsz", 640))
+        self._conf = float(getattr(defaults, "conf", 0.5))
+        self.temp_min_var = tk.StringVar(value="%.1f" % defaults.temp_min)
+        self.temp_max_var = tk.StringVar(value="%.1f" % defaults.temp_max)
+        self.humidity_min_var = tk.StringVar(value="%.1f" % defaults.humidity_min)
+        self.humidity_max_var = tk.StringVar(value="%.1f" % defaults.humidity_max)
+        self.kpt_conf_var = tk.StringVar(value="%.2f" % defaults.kpt_conf)
+        self.arc_var = tk.StringVar(value={
+            "long": "长弧（常见表计）", "short": "短弧", "auto": "自动",
+        }.get(getattr(defaults, "arc", "long"), "长弧（常见表计）"))
+        self.error_var = tk.StringVar(value="")
+
+        body = ttk.Frame(self, padding=(22, 16))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+
+        ttk.Label(body, text="仪表识别设置", font=self._title_font).grid(
+            row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(
+            body,
+            text="关键点：轴 / 尖端 / 最小刻度 / 最大刻度；按量程换算读数。",
+            foreground="#666666", font=self._sub_font,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 10))
+
+        row = 2
+        ttk.Label(body, text="温度范围：").grid(row=row, column=0, sticky="w", pady=3)
+        ttk.Spinbox(body, from_=-100, to=1000, increment=1, width=8,
+                    textvariable=self.temp_min_var).grid(row=row, column=1, sticky="w")
+        ttk.Label(body, text="～").grid(row=row, column=2)
+        ttk.Spinbox(body, from_=-100, to=1000, increment=1, width=8,
+                    textvariable=self.temp_max_var).grid(row=row, column=3, sticky="w")
+        row += 1
+        ttk.Label(body, text="湿度范围：").grid(row=row, column=0, sticky="w", pady=3)
+        ttk.Spinbox(body, from_=0, to=100, increment=1, width=8,
+                    textvariable=self.humidity_min_var).grid(row=row, column=1, sticky="w")
+        ttk.Label(body, text="～").grid(row=row, column=2)
+        ttk.Spinbox(body, from_=0, to=100, increment=1, width=8,
+                    textvariable=self.humidity_max_var).grid(row=row, column=3, sticky="w")
+        row += 1
+        ttk.Label(body, text="关键点置信度：").grid(row=row, column=0, sticky="w", pady=3)
+        ttk.Spinbox(body, from_=0.0, to=1.0, increment=0.05, width=8,
+                    textvariable=self.kpt_conf_var).grid(row=row, column=1, sticky="w")
+        row += 1
+        ttk.Label(body, text="刻度弧方向：").grid(row=row, column=0, sticky="w", pady=3)
+        self.arc_combo = ttk.Combobox(
+            body, textvariable=self.arc_var, width=16, state="readonly",
+            values=("长弧（常见表计）", "短弧", "自动"))
+        self.arc_combo.grid(row=row, column=1, columnspan=3, sticky="w")
+        row += 1
+        ttk.Label(body, text="提示：长弧适合大多数圆形温度/湿度表；拿不准时先用长弧。",
+                  foreground="#888888", font=self._sub_font).grid(
+            row=row, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        row += 1
+        ttk.Label(body, textvariable=self.error_var,
+                  foreground="#b00020").grid(
+            row=row, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        row += 1
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=row, column=0, columnspan=4, sticky="e", pady=(10, 0))
+        ttk.Button(buttons, text="取消", command=self._cancel).pack(side="right")
+        ttk.Button(buttons, text="开始识别", command=self._ok).pack(
+            side="right", padx=(0, 8))
+
+        self.update_idletasks()
+        self._center()
+
+    def _center(self) -> None:
+        self.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        x = max(0, (self.winfo_screenwidth() - width) // 2)
+        y = max(0, (self.winfo_screenheight() - height) // 3)
+        self.geometry("+{}+{}".format(x, y))
+
+    def _arc(self) -> str:
+        return {"长弧（常见表计）": "long", "短弧": "short", "自动": "auto"}.get(
+            self.arc_var.get(), "long")
+
+    def _ok(self) -> None:
+        try:
+            settings = gauge_module.GaugeSettings(
+                temp_min=float(self.temp_min_var.get()),
+                temp_max=float(self.temp_max_var.get()),
+                humidity_min=float(self.humidity_min_var.get()),
+                humidity_max=float(self.humidity_max_var.get()),
+                kpt_conf=float(self.kpt_conf_var.get()),
+                arc=self._arc(),
+                imgsz=self._imgsz,
+                conf=self._conf,
+            ).validate()
+        except Exception as error:
+            self.error_var.set(str(error))
+            return
+        self.result = settings
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
+class GaugeApp(object):
+    """仪表识别窗口：Pose 关键点 + 读数。"""
+
+    BOX_COLORS = (
+        (230, 70, 70), (70, 160, 230), (80, 190, 120), (240, 170, 60),
+        (170, 110, 220), (240, 100, 180),
+    )
+
+    def __init__(self, root, camera, detector, model_path, output_root,
+                 model_dir, infer_device="auto", imgsz=640):
+        self.root = root
+        self.camera = camera
+        self.detector = detector
+        self.model_path = Path(model_path)
+        self.model_dir = Path(model_dir)
+        self.infer_device = infer_device
+        self.imgsz = int(imgsz)
+        self.settings = detector.settings
+        self.output_root = Path(output_root)
+
+        self._photo = None
+        self._last_frame = None
+        self._frame_id = 0
+        self._recent_frames = {}
+        self._last_result_id = -1
+        self._last_error = ""
+        self._dialog_open = False
+        self._closed = False
+        self._after_id = None
+        self._failures = 0
+        self._next_reopen = 0.0
+        self._fps = 0.0
+        self._fps_count = 0
+        self._fps_start = time.monotonic()
+        self._font_path = find_cjk_font() if PIL_AVAILABLE else None
+        self._font_cache = {}
+        self._bold_font = tkfont.Font(root=root, size=12, weight="bold")
+
+        self.model_var = tk.StringVar(value=shorten(self.model_path.name, 26))
+        self.infer_var = tk.StringVar(value="推理：--")
+        self.det_var = tk.StringVar(value="仪表：0")
+        self.fps_var = tk.StringVar(value="预览：--")
+        self.status_var = tk.StringVar(value=self._model_summary())
+
+        self._build_ui()
+        self._bind_keys()
+        self.root.title("仪表识别 - {}".format(self.model_path.name))
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.minsize(560, 420)
+        self._tick()
+
+    # -- 界面 ---------------------------------------------------------
+    def _model_summary(self) -> str:
+        names = [self.detector.names[key] for key in sorted(self.detector.names)]
+        return "模型：{} · 类别：{}".format(
+            display_path(self.model_path), "、".join(names) or "?")
+
+    def _reading_root(self) -> Path:
+        stem = sanitize_type(Path(self.detector.model_path).stem) or "pose"
+        return self.output_root / "仪表识别" / stem
+
+    def _build_ui(self) -> None:
+        top = ttk.Frame(self.root, padding=(14, 12, 14, 4))
+        top.pack(fill="x")
+        ttk.Label(top, text="模型：").pack(side="left")
+        ttk.Label(top, textvariable=self.model_var,
+                  font=self._bold_font).pack(side="left")
+        ttk.Button(top, text="更换模型 (M)",
+                   command=self.change_model).pack(side="left", padx=(8, 0))
+        ttk.Label(top, textvariable=self.infer_var).pack(side="left", padx=(14, 0))
+        ttk.Label(top, textvariable=self.det_var).pack(side="left", padx=(10, 0))
+        ttk.Button(top, text="保存当前帧 (S)",
+                   command=self.save_snapshot).pack(side="right")
+        ttk.Button(top, text="保存读数 (R)",
+                   command=self.save_readings).pack(side="right", padx=(0, 6))
+
+        self.preview = tk.Label(
+            self.root, bg="#141414", fg="#bbbbbb",
+            text="正在打开摄像头…", takefocus=True,
+        )
+        self.preview.pack(fill="both", expand=True, padx=14, pady=6)
+        self.preview.bind("<Button-1>", lambda event: self.preview.focus_set())
+
+        bottom = ttk.Frame(self.root, padding=(14, 0, 14, 10))
+        bottom.pack(fill="x")
+        self.status_label = ttk.Label(
+            bottom, textvariable=self.status_var, foreground="#444444")
+        self.status_label.pack(side="left")
+        ttk.Label(bottom, textvariable=self.fps_var,
+                  foreground="#666666").pack(side="right")
+        ttk.Button(bottom, text="打开记录目录",
+                   command=self.open_folder).pack(side="right", padx=(0, 8))
+
+    def _bind_keys(self) -> None:
+        self.root.bind("<KeyPress-m>", self._on_key_m)
+        self.root.bind("<KeyPress-M>", self._on_key_m)
+        self.root.bind("<KeyPress-s>", self._on_key_s)
+        self.root.bind("<KeyPress-S>", self._on_key_s)
+        self.root.bind("<KeyPress-r>", self._on_key_r)
+        self.root.bind("<KeyPress-R>", self._on_key_r)
+        self.root.bind("<Escape>", lambda event: self.close())
+
+    def _focus_is_text(self) -> bool:
+        widget = self.root.focus_get()
+        return isinstance(widget, (tk.Entry, tk.Text, tk.Spinbox,
+                                   ttk.Entry, ttk.Spinbox))
+
+    def _on_key_m(self, event=None):
+        if self._focus_is_text() or self._dialog_open:
+            return None
+        self.change_model()
+        return "break"
+
+    def _on_key_s(self, event=None):
+        if self._focus_is_text() or self._dialog_open:
+            return None
+        self.save_snapshot()
+        return "break"
+
+    def _on_key_r(self, event=None):
+        if self._focus_is_text() or self._dialog_open:
+            return None
+        self.save_readings()
+        return "break"
+
+    def _set_status(self, text: str, error: bool = False) -> None:
+        self.status_var.set(text)
+        self.status_label.configure(foreground="#b00020" if error else "#444444")
+
+    # -- 主循环 -------------------------------------------------------
+    def _tick(self) -> None:
+        if self._closed:
+            return
+        now = time.monotonic()
+        if self.camera.cap is None:
+            self._try_reopen()
+        frame = self.camera.read() if self.camera.cap is not None else None
+        if frame is None:
+            self._failures += 1
+            if self._failures == 12:
+                self._set_status("摄像头没有画面，正在尝试重连…", error=True)
+                self.camera.release()
+        else:
+            if self._failures >= 12:
+                self._set_status("摄像头已恢复")
+            self._failures = 0
+            self._last_frame = frame
+            self._frame_id += 1
+            self._recent_frames[self._frame_id] = frame
+            cutoff = self._frame_id - 25
+            for key in list(self._recent_frames):
+                if key < cutoff:
+                    del self._recent_frames[key]
+            self.detector.submit(frame, self._frame_id)
+            latest = self.detector.latest()
+            self._render(frame, latest)
+            self._update_stats(latest, now)
+        try:
+            self._after_id = self.root.after(20, self._tick)
+        except tk.TclError:
+            self._after_id = None
+
+    def _update_stats(self, latest, now: float) -> None:
+        self._fps_count += 1
+        elapsed = now - self._fps_start
+        if elapsed >= 0.5:
+            self._fps = self._fps_count / elapsed
+            self._fps_count = 0
+            self._fps_start = now
+            self.fps_var.set("预览：{:.1f} fps".format(self._fps))
+        if latest is None:
+            return
+        frame_id, detections, infer_ms = latest
+        if frame_id != self._last_result_id:
+            self._last_result_id = frame_id
+            self.infer_var.set("推理：{} ms".format(int(round(infer_ms))))
+            self.det_var.set("仪表：{}".format(len(detections)))
+        error = getattr(self.detector, "last_error", "")
+        if not error:
+            if self._last_error:
+                self._last_error = ""
+                self._set_status(self._model_summary())
+        elif error != self._last_error:
+            self._last_error = error
+            self._set_status("姿态推理出错：{}".format(error[:100]), error=True)
+
+    def _try_reopen(self) -> None:
+        now = time.monotonic()
+        if now < self._next_reopen:
+            return
+        self._next_reopen = now + 2.0
+        try:
+            self.camera.open()
+        except CameraError as error:
+            self._set_status(
+                "摄像头连接失败：{}".format(str(error).splitlines()[0]), error=True)
+            return
+        width, height = self.camera.frame_size
+        self._set_status("摄像头已连接：{}x{}".format(width, height))
+        self._failures = 0
+
+    # -- 绘制 ---------------------------------------------------------
+    def _render(self, frame, latest) -> None:
+        if not PIL_AVAILABLE:
+            return
+        detections = latest[1] if latest else []
+        infer_ms = latest[2] if latest else 0.0
+        height, width = frame.shape[:2]
+        scale = min(1.0, float(MAX_PREVIEW_W) / width, float(MAX_PREVIEW_H) / height)
+        if scale < 1.0:
+            display = cv2.resize(
+                frame, (max(1, int(width * scale)), max(1, int(height * scale))),
+                interpolation=cv2.INTER_AREA)
+        else:
+            display = frame
+        try:
+            image = Image.fromarray(cv2.cvtColor(display, cv2.COLOR_BGR2RGB))
+            image = self._annotate(image, detections, scale, infer_ms)
+            photo = ImageTk.PhotoImage(image)
+        except Exception:
+            return
+        self._photo = photo
+        self.preview.configure(image=photo, text="")
+
+    def _annotate(self, image, detections, scale: float, infer_ms: float = 0.0):
+        draw = ImageDraw.Draw(image)
+        width, height = image.size
+        font = self._get_font(18)
+        small = self._get_font(14)
+
+        for det in detections:
+            x1, y1, x2, y2 = [int(round(v * scale)) for v in det.box]
+            color = self.BOX_COLORS[det.class_id % len(self.BOX_COLORS)]
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+
+            points = det.keypoints * scale
+            axis, tip, min_pt, max_pt = points[0], points[1], points[2], points[3]
+            draw.line([tuple(axis), tuple(tip)], fill=(240, 60, 60), width=4)
+            draw.line([tuple(axis), tuple(min_pt)], fill=(80, 130, 220), width=1)
+            draw.line([tuple(axis), tuple(max_pt)], fill=(70, 180, 100), width=1)
+            for point, point_color in (
+                    (axis, (255, 255, 255)), (tip, (240, 60, 60)),
+                    (min_pt, (80, 130, 220)), (max_pt, (70, 180, 100))):
+                px, py = int(round(point[0])), int(round(point[1]))
+                draw.ellipse([px - 5, py - 5, px + 5, py + 5],
+                             fill=point_color, outline=(0, 0, 0))
+
+            if small is not None and len(detections) == 1:
+                for point, label in ((axis, "轴"), (tip, "尖"),
+                                     (min_pt, "最小"), (max_pt, "最大")):
+                    px, py = int(round(point[0])), int(round(point[1]))
+                    draw.text((px + 7, py - 16), label, font=small,
+                              fill=(255, 255, 255))
+
+            if font is not None:
+                text = self._reading_text(det)
+                bbox = draw.textbbox((0, 0), text, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                tx = min(max(0, x1), max(0, width - text_width - 8))
+                ty = y1 - text_height - 6
+                if ty < 0:
+                    ty = min(y1 + 2, max(0, height - text_height - 6))
+                draw.rectangle([tx, ty, tx + text_width + 8, ty + text_height + 6],
+                               fill=color)
+                text_color = (0, 0, 0) if sum(color) > 420 else (255, 255, 255)
+                draw.text((tx + 3, ty + 3 - bbox[1]), text,
+                          font=font, fill=text_color)
+
+        header = "{}  |  仪表 {}  |  推理 {} ms  |  {:.0f} fps".format(
+            self.model_var.get(), len(detections),
+            int(round(infer_ms)), self._fps)
+        self._draw_header(draw, header, width, height)
+        return image
+
+    @staticmethod
+    def _reading_text(det) -> str:
+        if det.value is None:
+            value = "--"
+        else:
+            value = "{:.2f} {}".format(det.value, det.unit)
+        if det.fraction is None:
+            percent = "--"
+        else:
+            percent = "{:.0f}%".format(max(0.0, min(1.0, det.fraction)) * 100.0)
+        text = "{} {} ({})".format(det.class_name, value, percent)
+        if det.message:
+            text += " " + det.message
+        return text
+
+    def _draw_header(self, draw, text: str, width: int, height: int) -> None:
+        font = self._get_font(20)
+        if font is None:
+            return
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        draw.rectangle(
+            [10, 10, min(width, 10 + text_width + 18),
+             min(height, 10 + text_height + 18)], fill=(0, 0, 0))
+        draw.text((19, 19 - bbox[1]), text, font=font, fill=(255, 255, 255))
+
+    def _get_font(self, size: int):
+        if size in self._font_cache:
+            return self._font_cache[size]
+        font = None
+        if self._font_path:
+            try:
+                font = ImageFont.truetype(self._font_path, size)
+            except Exception:
+                self._font_path = None
+        if font is None:
+            try:
+                font = ImageFont.load_default()
+            except Exception:
+                font = None
+        self._font_cache[size] = font
+        return font
+
+    # -- 保存 ---------------------------------------------------------
+    def _latest_frame(self):
+        latest = self.detector.latest()
+        if latest is not None:
+            frame = self._recent_frames.get(latest[0])
+            if frame is not None:
+                return frame, latest
+        return self._last_frame, latest
+
+    def save_snapshot(self) -> None:
+        frame, latest = self._latest_frame()
+        if frame is None:
+            self._set_status("还没有摄像头画面", error=True)
+            return
+        detections = latest[1] if latest else []
+        try:
+            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            image = self._annotate(image, detections, 1.0,
+                                   latest[2] if latest else 0.0)
+            folder = self._reading_root() / "snapshots"
+            folder.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            path = folder / "{}_{}.jpg".format(
+                sanitize_type(Path(self.detector.model_path).stem) or "pose", stamp)
+            image.save(str(path), quality=92)
+        except Exception as error:
+            self._set_status("保存截图失败：{}".format(error), error=True)
+            return
+        self._set_status("已保存截图（{} 个仪表）：{}".format(
+            len(detections), display_path(path)))
+
+    def save_readings(self) -> None:
+        frame, latest = self._latest_frame()
+        if latest is None or not latest[1]:
+            self._set_status("当前没有仪表读数", error=True)
+            return
+        detections = latest[1]
+        folder = self._reading_root()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / "readings.jsonl"
+            record = {
+                "time": datetime.now().isoformat(timespec="seconds"),
+                "model": Path(self.detector.model_path).name,
+                "frame_id": int(latest[0]),
+                "frame_size": [int(frame.shape[1]), int(frame.shape[0])]
+                              if frame is not None else None,
+                "detections": [{
+                    "class_id": int(det.class_id),
+                    "class_name": det.class_name,
+                    "conf": round(float(det.conf), 4),
+                    "value": None if det.value is None else round(float(det.value), 3),
+                    "unit": det.unit,
+                    "fraction": None if det.fraction is None else round(float(det.fraction), 4),
+                    "angle_deg": None if det.angle_deg is None else round(float(det.angle_deg), 2),
+                    "on_scale": bool(det.on_scale),
+                    "message": det.message,
+                    "box": [round(float(v), 1) for v in det.box],
+                    "keypoints": [[round(float(x), 1), round(float(y), 1)]
+                                  for x, y in det.keypoints],
+                    "keypoint_conf": [round(float(v), 3) for v in det.keypoint_conf],
+                } for det in detections],
+            }
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as error:
+            self._set_status("保存读数失败：{}".format(error), error=True)
+            return
+        self._set_status("已保存 {} 条仪表读数 → {}".format(
+            len(detections), display_path(path)))
+
+    def open_folder(self) -> None:
+        try:
+            folder = self._reading_root()
+            folder.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(["xdg-open", str(folder)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as error:
+            self._set_status("无法打开目录：{}".format(error), error=True)
+
+    # -- 模型 ---------------------------------------------------------
+    def change_model(self) -> None:
+        if self._dialog_open or self._closed:
+            return
+        self._dialog_open = True
+        try:
+            dialog = ModelDialog(
+                self.root, self.model_dir, initial_model=str(self.model_path),
+                title="更换仪表 Pose 模型")
+            self.root.wait_window(dialog)
+            if not dialog.result:
+                return
+            new_path = dialog.result
+            self._set_status("正在加载姿态模型：{}…".format(new_path.name))
+            self.root.update_idletasks()
+            try:
+                new_detector = gauge_module.PoseDetector(
+                    new_path, self.settings, self.infer_device)
+            except gauge_module.ModelError as error:
+                messagebox.showerror("姿态模型加载失败", str(error), parent=self.root)
+                self._set_status("模型加载失败，仍使用原模型", error=True)
+                return
+            old_detector = self.detector
+            self.detector = new_detector
+            self.model_path = new_path
+            self.model_var.set(shorten(new_path.name, 26))
+            self.root.title("仪表识别 - {}".format(new_path.name))
+            self._last_result_id = -1
+            self._last_error = ""
+            old_detector.close()
+            self._set_status(self._model_summary())
+        finally:
+            self._dialog_open = False
+            if not self._closed:
+                try:
+                    self.preview.focus_set()
+                except tk.TclError:
+                    pass
+
+    # -- 关闭 ---------------------------------------------------------
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._after_id is not None:
+            try:
+                self.root.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+        try:
+            self.detector.close()
+        except Exception:
+            pass
+        self.camera.release()
+        self.root.destroy()
+
+
 # ---------------------------------------------------------------------------
 # 图形界面启动流程
 # ---------------------------------------------------------------------------
@@ -2521,6 +3136,122 @@ def run_gui_scan(args, output_root: Path, root) -> int:
     return 0
 
 
+def _load_pose_detector_gui(root, model_path, settings, infer_device):
+    loading = tk.Toplevel(root)
+    loading.title("加载仪表姿态模型")
+    loading.resizable(False, False)
+    ttk.Label(
+        loading,
+        text="正在加载姿态模型：\n{}\n请稍候…".format(Path(model_path).name),
+        justify="center",
+    ).pack(padx=26, pady=20)
+    loading.update()
+    try:
+        detector = gauge_module.PoseDetector(
+            model_path, settings, infer_device)
+    except gauge_module.ModelError as error:
+        _destroy_quietly(loading)
+        messagebox.showerror("姿态模型加载失败", str(error))
+        return None
+    _destroy_quietly(loading)
+    return detector
+
+
+def run_gui_gauge(args, output_root: Path, root) -> int:
+    if not GAUGE_MODULE_AVAILABLE:
+        messagebox.showerror(
+            "仪表识别不可用",
+            "缺少 gauge.py 模块，请确认它和 capture_photos.py 在同一目录。")
+        root.destroy()
+        return 1
+    if not YOLO_RUNTIME_AVAILABLE:
+        messagebox.showerror(
+            "仪表识别不可用",
+            "当前 Python 没有安装 ultralytics。\n可执行：pip3 install ultralytics")
+        root.destroy()
+        return 1
+
+    model_dir = Path(args.model_dir).expanduser()
+    model_path = Path(args.pose_model).expanduser() if args.pose_model else None
+    if model_path is None or not model_path.is_file():
+        if args.pose_model:
+            messagebox.showwarning(
+                "找不到姿态模型",
+                "指定的 Pose 模型不存在：{}\n请从列表里选择。".format(args.pose_model))
+        dialog = ModelDialog(
+            root, model_dir, initial_model=None,
+            title="选择仪表 Pose 模型")
+        root.wait_window(dialog)
+        if not dialog.result:
+            root.destroy()
+            print("[photo_capture] 已取消")
+            return 0
+        model_path = dialog.result
+
+    try:
+        settings = gauge_module.GaugeSettings(
+            temp_min=args.gauge_temp_min,
+            temp_max=args.gauge_temp_max,
+            humidity_min=args.gauge_humidity_min,
+            humidity_max=args.gauge_humidity_max,
+            kpt_conf=args.gauge_kpt_conf,
+            arc=args.gauge_arc,
+            imgsz=args.imgsz,
+            conf=args.gauge_conf,
+        ).validate()
+    except Exception as error:
+        messagebox.showerror("仪表参数错误", str(error))
+        root.destroy()
+        return 1
+
+    dialog = GaugeSettingsDialog(root, settings)
+    root.wait_window(dialog)
+    if not dialog.result:
+        root.destroy()
+        print("[photo_capture] 已取消")
+        return 0
+    settings = dialog.result
+
+    detector = _load_pose_detector_gui(
+        root, model_path, settings, args.infer_device)
+    if detector is None:
+        root.destroy()
+        return 1
+
+    camera = Camera(
+        parse_camera_source(args.device),
+        width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+    )
+    try:
+        camera.open()
+    except CameraError as error:
+        detector.close()
+        messagebox.showerror("摄像头不可用", str(error))
+        root.destroy()
+        return 1
+
+    print("[photo_capture] 仪表识别模式")
+    print("[photo_capture] 模型：{}（{}）".format(
+        model_path, "、".join(detector.names.values())))
+    print("[photo_capture] 温度范围：{:g} ~ {:g}，湿度范围：{:g} ~ {:g}".format(
+        settings.temp_min, settings.temp_max,
+        settings.humidity_min, settings.humidity_max))
+    print("[photo_capture] 操作：M 换模型，S 存截图，R 存读数，Esc 退出")
+
+    try:
+        app = GaugeApp(
+            root, camera, detector, model_path, output_root, model_dir,
+            infer_device=args.infer_device, imgsz=args.imgsz)
+        root.deiconify()
+        root.lift()
+        app.preview.focus_set()
+        root.mainloop()
+    finally:
+        camera.release()
+        detector.close()
+    return 0
+
+
 def run_gui_photo(args, output_root: Path, root) -> int:
     initial_type = args.type or ""
     while True:
@@ -2592,6 +3323,8 @@ def run_gui(args, output_root: Path) -> int:
         return run_gui_detect(args, output_root, root)
     if mode == MODE_SCAN:
         return run_gui_scan(args, output_root, root)
+    if mode == MODE_GAUGE:
+        return run_gui_gauge(args, output_root, root)
     return run_gui_photo(args, output_root, root)
 
 # ---------------------------------------------------------------------------
@@ -3010,6 +3743,105 @@ def run_scan_cli(args, output_root: Path) -> int:
     return 0 if session.frame_paths else 1
 
 
+def run_gauge_cli(args, output_root: Path) -> int:
+    if not GAUGE_MODULE_AVAILABLE:
+        print("[photo_capture] 缺少 gauge.py 模块", file=sys.stderr)
+        return 1
+    if not YOLO_RUNTIME_AVAILABLE:
+        print("[photo_capture] 未安装 ultralytics，请先 pip3 install ultralytics",
+              file=sys.stderr)
+        return 1
+    try:
+        settings = gauge_module.GaugeSettings(
+            temp_min=args.gauge_temp_min,
+            temp_max=args.gauge_temp_max,
+            humidity_min=args.gauge_humidity_min,
+            humidity_max=args.gauge_humidity_max,
+            kpt_conf=args.gauge_kpt_conf,
+            arc=args.gauge_arc,
+            imgsz=args.imgsz,
+            conf=args.gauge_conf,
+        ).validate()
+    except Exception as error:
+        print("[photo_capture] 仪表参数错误：{}".format(error), file=sys.stderr)
+        return 1
+
+    model_dir = Path(args.model_dir).expanduser()
+    model_path = Path(args.pose_model).expanduser() if args.pose_model else None
+    if model_path is None or not model_path.is_file():
+        if args.pose_model:
+            print("[photo_capture] 找不到姿态模型：{}".format(args.pose_model),
+                  file=sys.stderr)
+        try:
+            model_path = prompt_model_cli(model_dir)
+        except (EOFError, KeyboardInterrupt):
+            print("\n[photo_capture] 已取消")
+            return 0
+
+    try:
+        detector = gauge_module.PoseDetector(
+            model_path, settings, args.infer_device)
+    except gauge_module.ModelError as error:
+        print("[photo_capture] {}".format(error), file=sys.stderr)
+        return 1
+
+    camera = Camera(
+        parse_camera_source(args.device),
+        width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+    )
+    try:
+        camera.open()
+    except CameraError as error:
+        detector.close()
+        print("[photo_capture] {}".format(error), file=sys.stderr)
+        return 1
+
+    print("[photo_capture] 仪表识别模式（命令行）")
+    print("[photo_capture] 模型：{}（{}）".format(
+        model_path, "、".join(detector.names.values())))
+    print("[photo_capture] 温度范围：{:g} ~ {:g}，湿度范围：{:g} ~ {:g}，弧：{}".format(
+        settings.temp_min, settings.temp_max,
+        settings.humidity_min, settings.humidity_max, settings.arc))
+    print("[photo_capture] Ctrl+C 退出")
+
+    frames = 0
+    failures = 0
+    last_print = time.monotonic()
+    try:
+        while True:
+            frame = camera.read()
+            if frame is None:
+                failures += 1
+                if failures >= 20:
+                    print("[photo_capture] 摄像头没有画面，退出", file=sys.stderr)
+                    break
+                time.sleep(0.05)
+                continue
+            failures = 0
+            frames += 1
+            detector.submit(frame, frames)
+            latest = detector.latest()
+            now = time.monotonic()
+            if now - last_print >= 1.0:
+                if latest is not None and latest[1]:
+                    text = " | ".join(
+                        gauge_module.reading_text(det) for det in latest[1])
+                    print("[{}] {} 个仪表 | {}".format(
+                        datetime.now().strftime("%H:%M:%S"), len(latest[1]), text))
+                else:
+                    print("[{}] 未识别到仪表".format(
+                        datetime.now().strftime("%H:%M:%S")))
+                last_print = now
+            time.sleep(0.01)
+    except KeyboardInterrupt:
+        print()
+    finally:
+        camera.release()
+        detector.close()
+    print("[photo_capture] 退出，共处理 {} 帧".format(frames))
+    return 0
+
+
 def run_cli(args, output_root: Path) -> int:
     print("[photo_capture] 输出根目录：{}".format(display_path(output_root)))
     print("[photo_capture] 命令行模式（没有图形界面时使用）")
@@ -3020,9 +3852,10 @@ def run_cli(args, output_root: Path) -> int:
         print("  1) 拍照模式")
         print("  2) 模型测试模式")
         print("  3) 区域扫描（平移拼图）")
+        print("  4) 仪表识别（Pose 读温度/湿度表）")
         while True:
             try:
-                choice = input("请选择 [1/2]（默认 1）：").strip()
+                choice = input("请选择 [1/2/3/4]（默认 1）：").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n[photo_capture] 已取消")
                 return 0
@@ -3035,12 +3868,17 @@ def run_cli(args, output_root: Path) -> int:
             if choice == "3":
                 mode = MODE_SCAN
                 break
-            print("请输入 1 / 2 / 3")
+            if choice == "4":
+                mode = MODE_GAUGE
+                break
+            print("请输入 1 / 2 / 3 / 4")
 
     if mode == MODE_DETECT:
         return run_detect_cli(args, output_root)
     if mode == MODE_SCAN:
         return run_scan_cli(args, output_root)
+    if mode == MODE_GAUGE:
+        return run_gauge_cli(args, output_root)
 
     try:
         type_name = args.type or prompt_type_cli(output_root)
@@ -3136,9 +3974,10 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="调用本机摄像头拍照，或加载 YOLO 模型做实时检测。",
     )
-    parser.add_argument("--mode", choices=("ask", "photo", "detect", "scan"),
+    parser.add_argument("--mode", choices=("ask", "photo", "detect", "scan", "gauge"),
                         default="ask",
-                        help="启动模式：ask 每次询问，photo 拍照，detect 模型测试，scan 区域扫描")
+                        help="启动模式：ask 每次询问，photo 拍照，detect 模型测试，"
+                             "scan 区域扫描，gauge 仪表识别")
     parser.add_argument("-d", "--output-dir", default=str(DEFAULT_OUTPUT_DIR),
                         help="照片根目录（默认：~/Pictures/photo_capture）")
     parser.add_argument("-t", "--type", default=None,
@@ -3208,6 +4047,25 @@ def parse_args(argv=None):
                         help="命令行自动扫描不再询问确认")
     parser.add_argument("--force", action="store_true",
                         help="忽略 /cmd_vel 上其他发布者的冲突警告")
+
+    # ---- 仪表识别（Pose） ----
+    parser.add_argument("--pose-model", default=str(DEFAULT_POSE_MODEL),
+                        help="仪表 Pose 权重路径（默认：~/AI视觉/Pose.pt）")
+    parser.add_argument("--gauge-conf", type=float, default=0.5,
+                        help="仪表目标置信度阈值（默认 0.5）")
+    parser.add_argument("--gauge-kpt-conf", type=float, default=0.3,
+                        help="4 个关键点的最低置信度（默认 0.3）")
+    parser.add_argument("--gauge-arc", choices=("long", "short", "auto"),
+                        default="long",
+                        help="指针刻度弧：long 长弧（默认，常见表计）/ short / auto")
+    parser.add_argument("--gauge-temp-min", type=float, default=0.0,
+                        help="温度量程下限（默认 0）")
+    parser.add_argument("--gauge-temp-max", type=float, default=100.0,
+                        help="温度量程上限（默认 100）")
+    parser.add_argument("--gauge-humidity-min", type=float, default=0.0,
+                        help="湿度量程下限（默认 0）")
+    parser.add_argument("--gauge-humidity-max", type=float, default=100.0,
+                        help="湿度量程上限（默认 100）")
     return parser.parse_args(argv)
 
 

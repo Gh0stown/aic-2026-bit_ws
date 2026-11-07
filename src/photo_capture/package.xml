@@ -3,8 +3,8 @@
   <name>photo_capture</name>
   <version>0.1.0</version>
   <description>
-    摄像头拍照采集、YOLO 实时检测和区域平移扫描拼图：按类型保存照片，加载 .pt 权重实时检测，
-    或控制麦轮底盘横向平移、逐帧拍摄并拼成横向大图。
+    摄像头拍照采集、YOLO 实时检测、区域平移扫描拼图和仪表 Pose 识别：按类型保存照片，
+    加载 .pt 权重实时检测，控制麦轮横向平移拼图，或读取温度/湿度表指针。
   </description>
   <maintainer email="mowen@todo.todo">mowen</maintainer>
   <license>BSD</license>

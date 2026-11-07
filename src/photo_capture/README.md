@@ -1,12 +1,14 @@
-# photo_capture —— 拍照 / YOLO 检测 / 区域扫描
+# photo_capture —— 拍照 / YOLO 检测 / 区域扫描 / 仪表识别
 
-调用本机摄像头的三个模式：
+调用本机摄像头的四个模式：
 
 - **拍照模式**：按类型采集照片，照片存到 `输出目录/类型/`；可设连拍张数，运行中换类型。
 - **模型测试模式**：从 `~/AI视觉` 选 YOLO `.pt`，摄像头实时画框，显示类别、置信度、推理耗时；
   可换模型、调置信度、保存带框截图。
 - **区域扫描模式**：控制麦轮底盘横向平移，停一下拍一张，最后拼成横向大图；
   也可不用底盘、手动遥控平移，脚本只负责抽帧和拼接。拼接后可用 YOLO 分块检测全景。
+- **仪表识别模式**：加载 Pose.pt，识别温度/湿度表的旋转轴、指针尖端、最小/最大刻度，
+  按量程换算读数，保存截图和 JSONL 记录。
 
 > 区域扫描目前只做**平移**场景，不做旋转全景。
 
@@ -40,8 +42,9 @@ rosrun photo_capture capture_photos.py
 python3 src/photo_capture/scripts/capture_photos.py
 ```
 
-启动后先弹「选择启动模式」：点按钮或按 `1`（拍照）/ `2`（模型测试）/ `3`（区域扫描）。
-想跳过询问可以用 `--mode photo` / `--mode detect` / `--mode scan`。
+启动后先弹「选择启动模式」：点按钮或按 `1`（拍照）/ `2`（模型测试）/ `3`（区域扫描）/
+`4`（仪表识别）。想跳过询问可以用 `--mode photo` / `--mode detect` / `--mode scan` /
+`--mode gauge`。
 
 ## 拍照模式
 
@@ -61,7 +64,7 @@ python3 src/photo_capture/scripts/capture_photos.py
 没有图形界面（或 `--no-gui`）时，先选模式（`--mode photo` 可跳过）：
 
 ```
-1 / 2 / 3        选择拍照 / 模型测试 / 区域扫描
+1 / 2 / 3 / 4    选择拍照 / 模型测试 / 区域扫描 / 仪表识别
 直接回车 / p     拍一次（按当前张数）
 t [类型]         换类型，例如：t 侧面
 n [张数]         改连拍张数，例如：n 3
@@ -197,12 +200,76 @@ rosrun photo_capture capture_photos.py --no-gui --mode scan --scan-mode strafe \
 
 CLI 自动扫描默认会先打印摘要并等回车确认；`--yes` 跳过。
 
+## 仪表识别模式（Pose）
+
+针对圆形温度/湿度表：模型 `~/AI视觉/Pose.pt` 输出 4 个关键点：
+
+- 0 = 指针旋转轴
+- 1 = 指针尖端
+- 2 = 量程最小值刻度
+- 3 = 量程最大值刻度
+
+类别：`temperature` / `humidity`。读数计算：
+
+1. 以旋转轴为圆心，求 尖端、最小刻度、最大刻度 的角度；
+2. 把指针投影到 最小 → 最大 的刻度弧上，得到 0~1 的比例；
+3. 按温度/湿度量程换算：`value = min + ratio * (max - min)`。
+
+默认量程是 `0–100`（温度 °C、湿度 %RH），**请按实际表盘改**：
+
+```bash
+rosrun photo_capture capture_photos.py --mode gauge \
+  --gauge-temp-min -20 --gauge-temp-max 60 \
+  --gauge-humidity-min 0 --gauge-humidity-max 100
+```
+
+常见表计的刻度从最小值经顶部绕到最大值，默认用**长弧** `--gauge-arc long`；
+如果表盘是短弧，换 `short`，拿不准用 `auto`。
+
+### 界面操作
+
+| 操作 | 说明 |
+| --- | --- |
+| 点「更换模型」 / `M` | 换一个 `.pt`（必须是 pose 任务） |
+| 点「保存当前帧」 / `S` | 保存带关键点和读数的截图 |
+| 点「保存读数」 / `R` | 把当前读数追加到 `readings.jsonl` |
+| 点「打开记录目录」 | 打开当前模型的记录目录 |
+| `Esc` / 关窗口 | 退出 |
+
+截图和读数保存到：
+
+```
+~/Pictures/photo_capture/仪表识别/<模型名>/
+├── snapshots/<模型名>_YYYYmmdd_HHMMSS_mmm.jpg
+└── readings.jsonl
+```
+
+`readings.jsonl` 每行是一条记录，包含时间、模型、类别、读数、量程比例、指针角度、
+目标置信度、关键点坐标和关键点置信度。
+
+### 命令行
+
+```bash
+rosrun photo_capture capture_photos.py --no-gui --mode gauge \
+  --pose-model ~/AI视觉/Pose.pt --gauge-conf 0.5 --gauge-kpt-conf 0.3
+
+# 指定量程和弧
+rosrun photo_capture capture_photos.py --no-gui --mode gauge \
+  --gauge-temp-min 0 --gauge-temp-max 50 --gauge-humidity-min 20 --gauge-humidity-max 90 \
+  --gauge-arc long
+```
+
+终端每秒打印一次，`Ctrl+C` 退出。没有图形界面时只打印，不保存截图/JSONL。
+
+> 模型必须是 pose 任务；选错普通检测模型会提示“所选模型不是 pose 模型”。
+> 关键点置信度低于 `--gauge-kpt-conf` 时不会算读数，界面会显示原因。
+
 ## 常用参数
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--mode` | `ask` | `ask` 每次询问 / `photo` / `detect` / `scan` |
-| `-d, --output-dir` | `~/Pictures/photo_capture` | 照片、模型截图、区域扫描的根目录 |
+| `--mode` | `ask` | `ask` 每次询问 / `photo` / `detect` / `scan` / `gauge` |
+| `-d, --output-dir` | `~/Pictures/photo_capture` | 照片、模型截图、区域扫描、仪表记录的根目录 |
 | `-t, --type` | 无（启动时询问） | 预填照片类型 |
 | `-c, --count` | `1` | 一次连拍张数（1-99） |
 | `--device` | `0` | 摄像头编号 / `/dev/video0` / 视频文件（测试用） |
@@ -234,6 +301,14 @@ CLI 自动扫描默认会先打印摘要并等回车确认；`--yes` 跳过。
 | `--scan-dry-run` | 关 | 干跑，不连接 ROS、不产生真实运动 |
 | `--detect-panorama` | 关 | 拼接后用 YOLO 分块检测 |
 | `--yes` | 关 | CLI 自动扫描免确认 |
+| `--pose-model` | `~/AI视觉/Pose.pt` | 仪表 Pose 权重 |
+| `--gauge-conf` | `0.5` | 仪表目标置信度 |
+| `--gauge-kpt-conf` | `0.3` | 4 个关键点的最低置信度 |
+| `--gauge-arc` | `long` | `long` / `short` / `auto` 刻度弧 |
+| `--gauge-temp-min` | `0` | 温度量程下限 |
+| `--gauge-temp-max` | `100` | 温度量程上限 |
+| `--gauge-humidity-min` | `0` | 湿度量程下限 |
+| `--gauge-humidity-max` | `100` | 湿度量程上限 |
 | `--force` | 关 | 忽略 `/cmd_vel` 上其他发布者的冲突 |
 
 ## 保存规则
@@ -265,6 +340,13 @@ YOLO 裁剪图（按模型 / 类别）：
 <输出目录>/区域扫描/<区域名>_<时间戳>/{frames,panorama.jpg,panorama_detected.jpg,meta.json}
 ```
 
+仪表识别：
+
+```
+<输出目录>/仪表识别/<模型名>/snapshots/*.jpg
+<输出目录>/仪表识别/<模型名>/readings.jsonl
+```
+
 名字里的 `/ \ : * ? " < > |` 会换成 `_`；文件名带毫秒时间戳，不覆盖旧图。
 
 ## 常见问题
@@ -280,5 +362,8 @@ YOLO 裁剪图（按模型 / 类别）：
 - **拼接失败**：帧太少、重叠不足、纹理太少或运动模糊都可能导致失败；原始帧都保留，
   可以增加帧数/减小步长重拍，或直接用帧。
 - **模型测试/全景检测报没有 ultralytics**：`pip3 install ultralytics`，并确认用的是同一个 Python。
+- **仪表识别报“不是 pose 模型”**：要用 Pose.pt 这类姿态权重，不能选普通检测模型。
+- **仪表读数不对**：先确认量程（`--gauge-temp-min/max`、`--gauge-humidity-min/max`）和
+  刻度弧（`long/short/auto`）；默认长弧适合大多数圆形表。
 - **CPU 上很慢**：`--imgsz 416`，或关掉其他占 CPU 的程序；有 GPU 用 `--infer-device cuda`。
 - **中文类别显示成方块**：脚本自动找 Noto CJK / 文泉驿字体；找不到时只画框、不画文字。

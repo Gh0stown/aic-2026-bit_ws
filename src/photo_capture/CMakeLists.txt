@@ -15,5 +15,6 @@ install(FILES
   scripts/scan.py
   scripts/stitch.py
   scripts/chassis.py
+  scripts/gauge.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
