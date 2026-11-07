@@ -2394,6 +2394,9 @@ class GaugeSettingsDialog(tk.Toplevel if TK_AVAILABLE else object):
         self.arc_var = tk.StringVar(value={
             "long": "长弧（常见表计）", "short": "短弧", "auto": "自动",
         }.get(getattr(defaults, "arc", "long"), "长弧（常见表计）"))
+        self.pointer_var = tk.StringVar(value={
+            "radon": "Radon（推荐）", "tip": "模型尖端",
+        }.get(getattr(defaults, "pointer", "radon"), "Radon（推荐）"))
         self.error_var = tk.StringVar(value="")
 
         body = ttk.Frame(self, padding=(22, 16))
@@ -2433,6 +2436,12 @@ class GaugeSettingsDialog(tk.Toplevel if TK_AVAILABLE else object):
             values=("长弧（常见表计）", "短弧", "自动"))
         self.arc_combo.grid(row=row, column=1, columnspan=3, sticky="w")
         row += 1
+        ttk.Label(body, text="指针角度：").grid(row=row, column=0, sticky="w", pady=3)
+        self.pointer_combo = ttk.Combobox(
+            body, textvariable=self.pointer_var, width=16, state="readonly",
+            values=("Radon（推荐）", "模型尖端"))
+        self.pointer_combo.grid(row=row, column=1, columnspan=3, sticky="w")
+        row += 1
         ttk.Label(body, text="提示：长弧适合大多数圆形温度/湿度表；拿不准时先用长弧。",
                   foreground="#888888", font=self._sub_font).grid(
             row=row, column=0, columnspan=4, sticky="w", pady=(4, 0))
@@ -2463,6 +2472,10 @@ class GaugeSettingsDialog(tk.Toplevel if TK_AVAILABLE else object):
         return {"长弧（常见表计）": "long", "短弧": "short", "自动": "auto"}.get(
             self.arc_var.get(), "long")
 
+    def _pointer(self) -> str:
+        return {"Radon（推荐）": "radon", "模型尖端": "tip"}.get(
+            self.pointer_var.get(), "radon")
+
     def _ok(self) -> None:
         try:
             settings = gauge_module.GaugeSettings(
@@ -2472,6 +2485,7 @@ class GaugeSettingsDialog(tk.Toplevel if TK_AVAILABLE else object):
                 humidity_max=float(self.humidity_max_var.get()),
                 kpt_conf=float(self.kpt_conf_var.get()),
                 arc=self._arc(),
+                pointer=self._pointer(),
                 imgsz=self._imgsz,
                 conf=self._conf,
             ).validate()
@@ -2505,8 +2519,15 @@ class GaugeApp(object):
         self.imgsz = int(imgsz)
         self.settings = detector.settings
         self.output_root = Path(output_root)
+        self.rectifier = gauge_module.GaugeRectifier(
+            self.output_root, self.model_path, self.settings)
 
         self._photo = None
+        self._readings = []
+        self._readings_frame_id = -1
+        self._last_template_message = ""
+        self._rectified_photo = None
+        self._rectified_window = None
         self._last_frame = None
         self._frame_id = 0
         self._recent_frames = {}
@@ -2561,6 +2582,8 @@ class GaugeApp(object):
                    command=self.save_snapshot).pack(side="right")
         ttk.Button(top, text="保存读数 (R)",
                    command=self.save_readings).pack(side="right", padx=(0, 6))
+        ttk.Button(top, text="重新标定 (T)",
+                   command=self.recalibrate).pack(side="right", padx=(0, 6))
 
         self.preview = tk.Label(
             self.root, bg="#141414", fg="#bbbbbb",
@@ -2578,6 +2601,8 @@ class GaugeApp(object):
                   foreground="#666666").pack(side="right")
         ttk.Button(bottom, text="打开记录目录",
                    command=self.open_folder).pack(side="right", padx=(0, 8))
+        ttk.Button(bottom, text="正视化 (V)",
+                   command=self.show_rectified).pack(side="right", padx=(0, 8))
 
     def _bind_keys(self) -> None:
         self.root.bind("<KeyPress-m>", self._on_key_m)
@@ -2586,6 +2611,10 @@ class GaugeApp(object):
         self.root.bind("<KeyPress-S>", self._on_key_s)
         self.root.bind("<KeyPress-r>", self._on_key_r)
         self.root.bind("<KeyPress-R>", self._on_key_r)
+        self.root.bind("<KeyPress-t>", self._on_key_t)
+        self.root.bind("<KeyPress-T>", self._on_key_t)
+        self.root.bind("<KeyPress-v>", self._on_key_v)
+        self.root.bind("<KeyPress-V>", self._on_key_v)
         self.root.bind("<Escape>", lambda event: self.close())
 
     def _focus_is_text(self) -> bool:
@@ -2609,6 +2638,18 @@ class GaugeApp(object):
         if self._focus_is_text() or self._dialog_open:
             return None
         self.save_readings()
+        return "break"
+
+    def _on_key_t(self, event=None):
+        if self._focus_is_text() or self._dialog_open:
+            return None
+        self.recalibrate()
+        return "break"
+
+    def _on_key_v(self, event=None):
+        if self._focus_is_text() or self._dialog_open:
+            return None
+        self.show_rectified()
         return "break"
 
     def _set_status(self, text: str, error: bool = False) -> None:
@@ -2641,14 +2682,36 @@ class GaugeApp(object):
                     del self._recent_frames[key]
             self.detector.submit(frame, self._frame_id)
             latest = self.detector.latest()
-            self._render(frame, latest)
-            self._update_stats(latest, now)
+            readings = self._process_readings(frame, latest)
+            self._render(frame, latest, readings)
+            self._update_stats(latest, now, readings)
         try:
             self._after_id = self.root.after(20, self._tick)
         except tk.TclError:
             self._after_id = None
 
-    def _update_stats(self, latest, now: float) -> None:
+    def _process_readings(self, frame, latest):
+        if latest is None:
+            return []
+        if latest[0] == self._readings_frame_id:
+            return self._readings
+        result_frame = self._recent_frames.get(latest[0], frame)
+        if result_frame is None:
+            return []
+        readings = []
+        for detection in latest[1]:
+            reading = self.rectifier.rectify(result_frame, detection)
+            if reading is not None:
+                readings.append(reading)
+        self._readings = readings
+        self._readings_frame_id = latest[0]
+        message = getattr(self.rectifier, "last_message", "")
+        if message and message != self._last_template_message:
+            self._last_template_message = message
+            self._set_status(message)
+        return readings
+
+    def _update_stats(self, latest, now: float, readings=None) -> None:
         self._fps_count += 1
         elapsed = now - self._fps_start
         if elapsed >= 0.5:
@@ -2662,7 +2725,8 @@ class GaugeApp(object):
         if frame_id != self._last_result_id:
             self._last_result_id = frame_id
             self.infer_var.set("推理：{} ms".format(int(round(infer_ms))))
-            self.det_var.set("仪表：{}".format(len(detections)))
+            count = len(readings) if readings is not None else len(detections)
+            self.det_var.set("仪表：{}".format(count))
         error = getattr(self.detector, "last_error", "")
         if not error:
             if self._last_error:
@@ -2688,10 +2752,11 @@ class GaugeApp(object):
         self._failures = 0
 
     # -- 绘制 ---------------------------------------------------------
-    def _render(self, frame, latest) -> None:
+    def _render(self, frame, latest, readings=None) -> None:
         if not PIL_AVAILABLE:
             return
-        detections = latest[1] if latest else []
+        if readings is None:
+            readings = self._readings
         infer_ms = latest[2] if latest else 0.0
         height, width = frame.shape[:2]
         scale = min(1.0, float(MAX_PREVIEW_W) / width, float(MAX_PREVIEW_H) / height)
@@ -2703,20 +2768,21 @@ class GaugeApp(object):
             display = frame
         try:
             image = Image.fromarray(cv2.cvtColor(display, cv2.COLOR_BGR2RGB))
-            image = self._annotate(image, detections, scale, infer_ms)
+            image = self._annotate(image, readings, scale, infer_ms)
             photo = ImageTk.PhotoImage(image)
         except Exception:
             return
         self._photo = photo
         self.preview.configure(image=photo, text="")
 
-    def _annotate(self, image, detections, scale: float, infer_ms: float = 0.0):
+    def _annotate(self, image, readings, scale: float, infer_ms: float = 0.0):
         draw = ImageDraw.Draw(image)
         width, height = image.size
         font = self._get_font(18)
         small = self._get_font(14)
 
-        for det in detections:
+        for reading in readings:
+            det = reading.detection
             x1, y1, x2, y2 = [int(round(v * scale)) for v in det.box]
             color = self.BOX_COLORS[det.class_id % len(self.BOX_COLORS)]
             draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
@@ -2733,7 +2799,7 @@ class GaugeApp(object):
                 draw.ellipse([px - 5, py - 5, px + 5, py + 5],
                              fill=point_color, outline=(0, 0, 0))
 
-            if small is not None and len(detections) == 1:
+            if small is not None and len(readings) == 1:
                 for point, label in ((axis, "轴"), (tip, "尖"),
                                      (min_pt, "最小"), (max_pt, "最大")):
                     px, py = int(round(point[0])), int(round(point[1]))
@@ -2741,7 +2807,7 @@ class GaugeApp(object):
                               fill=(255, 255, 255))
 
             if font is not None:
-                text = self._reading_text(det)
+                text = self._reading_text(reading)
                 bbox = draw.textbbox((0, 0), text, font=font)
                 text_width = bbox[2] - bbox[0]
                 text_height = bbox[3] - bbox[1]
@@ -2756,24 +2822,25 @@ class GaugeApp(object):
                           font=font, fill=text_color)
 
         header = "{}  |  仪表 {}  |  推理 {} ms  |  {:.0f} fps".format(
-            self.model_var.get(), len(detections),
+            self.model_var.get(), len(readings),
             int(round(infer_ms)), self._fps)
         self._draw_header(draw, header, width, height)
         return image
 
     @staticmethod
-    def _reading_text(det) -> str:
-        if det.value is None:
+    def _reading_text(reading) -> str:
+        det = reading.detection
+        if reading.value is None:
             value = "--"
         else:
-            value = "{:.2f} {}".format(det.value, det.unit)
-        if det.fraction is None:
+            value = "{:.2f} {}".format(reading.value, reading.unit)
+        if reading.fraction is None:
             percent = "--"
         else:
-            percent = "{:.0f}%".format(max(0.0, min(1.0, det.fraction)) * 100.0)
+            percent = "{:.0f}%".format(max(0.0, min(1.0, reading.fraction)) * 100.0)
         text = "{} {} ({})".format(det.class_name, value, percent)
-        if det.message:
-            text += " " + det.message
+        if reading.message:
+            text += " " + reading.message
         return text
 
     def _draw_header(self, draw, text: str, width: int, height: int) -> None:
@@ -2819,10 +2886,10 @@ class GaugeApp(object):
         if frame is None:
             self._set_status("还没有摄像头画面", error=True)
             return
-        detections = latest[1] if latest else []
+        readings = self._process_readings(frame, latest) if latest else []
         try:
             image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            image = self._annotate(image, detections, 1.0,
+            image = self._annotate(image, readings, 1.0,
                                    latest[2] if latest else 0.0)
             folder = self._reading_root() / "snapshots"
             folder.mkdir(parents=True, exist_ok=True)
@@ -2834,14 +2901,14 @@ class GaugeApp(object):
             self._set_status("保存截图失败：{}".format(error), error=True)
             return
         self._set_status("已保存截图（{} 个仪表）：{}".format(
-            len(detections), display_path(path)))
+            len(readings), display_path(path)))
 
     def save_readings(self) -> None:
         frame, latest = self._latest_frame()
-        if latest is None or not latest[1]:
+        readings = self._process_readings(frame, latest) if latest else []
+        if not readings:
             self._set_status("当前没有仪表读数", error=True)
             return
-        detections = latest[1]
         folder = self._reading_root()
         try:
             folder.mkdir(parents=True, exist_ok=True)
@@ -2853,20 +2920,22 @@ class GaugeApp(object):
                 "frame_size": [int(frame.shape[1]), int(frame.shape[0])]
                               if frame is not None else None,
                 "detections": [{
-                    "class_id": int(det.class_id),
-                    "class_name": det.class_name,
-                    "conf": round(float(det.conf), 4),
-                    "value": None if det.value is None else round(float(det.value), 3),
-                    "unit": det.unit,
-                    "fraction": None if det.fraction is None else round(float(det.fraction), 4),
-                    "angle_deg": None if det.angle_deg is None else round(float(det.angle_deg), 2),
-                    "on_scale": bool(det.on_scale),
-                    "message": det.message,
-                    "box": [round(float(v), 1) for v in det.box],
+                    "class_id": int(reading.detection.class_id),
+                    "class_name": reading.detection.class_name,
+                    "conf": round(float(reading.detection.conf), 4),
+                    "value": None if reading.value is None else round(float(reading.value), 3),
+                    "unit": reading.unit,
+                    "fraction": None if reading.fraction is None else round(float(reading.fraction), 4),
+                    "angle_deg": None if reading.angle_deg is None else round(float(reading.angle_deg), 2),
+                    "on_scale": bool(reading.on_scale),
+                    "message": reading.message,
+                    "template": reading.template.class_name,
+                    "box": [round(float(v), 1) for v in reading.detection.box],
                     "keypoints": [[round(float(x), 1), round(float(y), 1)]
-                                  for x, y in det.keypoints],
-                    "keypoint_conf": [round(float(v), 3) for v in det.keypoint_conf],
-                } for det in detections],
+                                  for x, y in reading.detection.keypoints],
+                    "keypoint_conf": [round(float(v), 3)
+                                      for v in reading.detection.keypoint_conf],
+                } for reading in readings],
             }
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -2874,7 +2943,7 @@ class GaugeApp(object):
             self._set_status("保存读数失败：{}".format(error), error=True)
             return
         self._set_status("已保存 {} 条仪表读数 → {}".format(
-            len(detections), display_path(path)))
+            len(readings), display_path(path)))
 
     def open_folder(self) -> None:
         try:
@@ -2884,6 +2953,56 @@ class GaugeApp(object):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError as error:
             self._set_status("无法打开目录：{}".format(error), error=True)
+
+    def recalibrate(self) -> None:
+        latest = self.detector.latest()
+        if latest is None or not latest[1]:
+            self._set_status("当前没有可标定的仪表检测", error=True)
+            return
+        count = self.rectifier.recalibrate(latest[1])
+        if count <= 0:
+            self._set_status("重新标定失败：关键点无效", error=True)
+            return
+        self._readings = []
+        self._readings_frame_id = -1
+        self._last_template_message = ""
+        self._set_status("已重新标定 {} 类模板（只用了静态关键点）".format(count))
+
+    def show_rectified(self) -> None:
+        if not self._readings:
+            self._set_status("还没有正视化结果", error=True)
+            return
+        reading = self._readings[0]
+        try:
+            image = Image.fromarray(cv2.cvtColor(reading.warped, cv2.COLOR_BGR2RGB))
+            photo = ImageTk.PhotoImage(image)
+        except Exception as error:
+            self._set_status("显示正视化失败：{}".format(error), error=True)
+            return
+        self._rectified_photo = photo
+        if self._rectified_window is not None and self._rectified_window.winfo_exists():
+            label = self._rectified_window.label
+            label.configure(image=photo)
+            self._rectified_window.title(
+                "正视化 - {}".format(reading.detection.class_name))
+            self._rectified_window.lift()
+            return
+        window = tk.Toplevel(self.root)
+        window.title("正视化 - {}".format(reading.detection.class_name))
+        window.resizable(False, False)
+        label = tk.Label(window, image=photo, bg="#141414")
+        label.pack(padx=8, pady=8)
+        window.label = label
+        window.protocol("WM_DELETE_WINDOW", self._close_rectified)
+        self._rectified_window = window
+
+    def _close_rectified(self) -> None:
+        if self._rectified_window is not None:
+            try:
+                self._rectified_window.destroy()
+            except tk.TclError:
+                pass
+        self._rectified_window = None
 
     # -- 模型 ---------------------------------------------------------
     def change_model(self) -> None:
@@ -2910,6 +3029,12 @@ class GaugeApp(object):
             old_detector = self.detector
             self.detector = new_detector
             self.model_path = new_path
+            self._close_rectified()
+            self.rectifier = gauge_module.GaugeRectifier(
+                self.output_root, self.model_path, self.settings)
+            self._readings = []
+            self._readings_frame_id = -1
+            self._last_template_message = ""
             self.model_var.set(shorten(new_path.name, 26))
             self.root.title("仪表识别 - {}".format(new_path.name))
             self._last_result_id = -1
@@ -2939,6 +3064,7 @@ class GaugeApp(object):
             self.detector.close()
         except Exception:
             pass
+        self._close_rectified()
         self.camera.release()
         self.root.destroy()
 
@@ -3196,6 +3322,7 @@ def run_gui_gauge(args, output_root: Path, root) -> int:
             humidity_max=args.gauge_humidity_max,
             kpt_conf=args.gauge_kpt_conf,
             arc=args.gauge_arc,
+            pointer=args.gauge_pointer,
             imgsz=args.imgsz,
             conf=args.gauge_conf,
         ).validate()
@@ -3759,6 +3886,7 @@ def run_gauge_cli(args, output_root: Path) -> int:
             humidity_max=args.gauge_humidity_max,
             kpt_conf=args.gauge_kpt_conf,
             arc=args.gauge_arc,
+            pointer=args.gauge_pointer,
             imgsz=args.imgsz,
             conf=args.gauge_conf,
         ).validate()
@@ -3784,6 +3912,7 @@ def run_gauge_cli(args, output_root: Path) -> int:
     except gauge_module.ModelError as error:
         print("[photo_capture] {}".format(error), file=sys.stderr)
         return 1
+    rectifier = gauge_module.GaugeRectifier(output_root, model_path, settings)
 
     camera = Camera(
         parse_camera_source(args.device),
@@ -3799,14 +3928,17 @@ def run_gauge_cli(args, output_root: Path) -> int:
     print("[photo_capture] 仪表识别模式（命令行）")
     print("[photo_capture] 模型：{}（{}）".format(
         model_path, "、".join(detector.names.values())))
-    print("[photo_capture] 温度范围：{:g} ~ {:g}，湿度范围：{:g} ~ {:g}，弧：{}".format(
+    print("[photo_capture] 温度范围：{:g} ~ {:g}，湿度范围：{:g} ~ {:g}，弧：{}，指针：{}".format(
         settings.temp_min, settings.temp_max,
-        settings.humidity_min, settings.humidity_max, settings.arc))
+        settings.humidity_min, settings.humidity_max,
+        settings.arc, settings.pointer))
     print("[photo_capture] Ctrl+C 退出")
 
     frames = 0
     failures = 0
     last_print = time.monotonic()
+    last_result_id = -1
+    last_readings = []
     try:
         while True:
             frame = camera.read()
@@ -3821,13 +3953,26 @@ def run_gauge_cli(args, output_root: Path) -> int:
             frames += 1
             detector.submit(frame, frames)
             latest = detector.latest()
+            if latest is not None and latest[0] != last_result_id:
+                last_result_id = latest[0]
+                readings = []
+                for detection in latest[1]:
+                    reading = rectifier.rectify(frame, detection)
+                    if reading is not None:
+                        readings.append(reading)
+                last_readings = readings
+            else:
+                readings = last_readings
+            if rectifier.last_message:
+                print("[photo_capture] {}".format(rectifier.last_message))
+                rectifier.last_message = ""
             now = time.monotonic()
             if now - last_print >= 1.0:
-                if latest is not None and latest[1]:
+                if readings:
                     text = " | ".join(
-                        gauge_module.reading_text(det) for det in latest[1])
+                        gauge_module.reading_text(reading) for reading in readings)
                     print("[{}] {} 个仪表 | {}".format(
-                        datetime.now().strftime("%H:%M:%S"), len(latest[1]), text))
+                        datetime.now().strftime("%H:%M:%S"), len(readings), text))
                 else:
                     print("[{}] 未识别到仪表".format(
                         datetime.now().strftime("%H:%M:%S")))
@@ -4058,6 +4203,9 @@ def parse_args(argv=None):
     parser.add_argument("--gauge-arc", choices=("long", "short", "auto"),
                         default="long",
                         help="指针刻度弧：long 长弧（默认，常见表计）/ short / auto")
+    parser.add_argument("--gauge-pointer", choices=("radon", "tip"),
+                        default="radon",
+                        help="指针角度：radon 正视化后用射线搜索（默认）/ tip 模型尖端")
     parser.add_argument("--gauge-temp-min", type=float, default=0.0,
                         help="温度量程下限（默认 0）")
     parser.add_argument("--gauge-temp-max", type=float, default=100.0,

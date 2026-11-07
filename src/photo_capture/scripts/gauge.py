@@ -9,17 +9,26 @@
     3 = 量程最大值刻度
 类别：temperature / humidity。
 
-读数：以旋转轴为圆心，把指针角度投影到 最小刻度 -> 最大刻度 的圆弧上，
-得到 0~1 的比例，再按用户设定的量程换算成温度/湿度。
+当前 Pose.pt 的 4 个点里只有 3 个是静态的（轴、最小、最大），tip 会随读数动。
+所以配准只用 3 个静态点做仿射 warp 到 512x512 正视空间，tip 不参与 warp；
+在正视空间里用 Radon（tip 作为搜索先验）求指针角度，再投影到最小->最大刻度弧，
+按量程换算读数。每类表第一次识别时自动标定模板，模板保存在输出目录的
+templates/<类别>.json，可按 T 重标。
+
+如果以后模型增加第 5 个静态关键点，可把 4 个静态点换成 homography。
 """
 
+import json
 import math
+import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 
 try:
@@ -40,6 +49,7 @@ class GaugeSettings:
     humidity_max: float = 100.0
     kpt_conf: float = 0.3
     arc: str = "long"        # long / short / auto
+    pointer: str = "radon"   # radon / tip
     imgsz: int = 640
     conf: float = 0.5
 
@@ -54,6 +64,7 @@ class GaugeSettings:
             raise ValueError("湿度上限必须大于下限")
         self.kpt_conf = max(0.0, min(1.0, float(self.kpt_conf)))
         self.arc = self.arc if self.arc in ("long", "short", "auto") else "long"
+        self.pointer = self.pointer if self.pointer in ("radon", "tip") else "radon"
         self.imgsz = max(64, int(self.imgsz))
         self.conf = max(0.01, min(0.99, float(self.conf)))
         return self
@@ -150,16 +161,24 @@ def keypoint_radius(points) -> float:
     return float(min(np.linalg.norm(points[i] - axis) for i in (1, 2, 3)))
 
 
-def reading_text(det: GaugeDetection) -> str:
-    if det.value is None:
+def reading_text(item) -> str:
+    det = getattr(item, "detection", item)
+    fraction = getattr(item, "fraction", None)
+    value_num = getattr(item, "value", None)
+    unit = getattr(item, "unit", "")
+    message = getattr(item, "message", "")
+    if value_num is None:
         value = "--"
     else:
-        value = "{:.2f} {}".format(det.value, det.unit)
-    if det.fraction is None:
+        value = "{:.2f} {}".format(value_num, unit)
+    if fraction is None:
         percent = "--"
     else:
-        percent = "{:.0f}%".format(max(0.0, min(1.0, det.fraction)) * 100.0)
-    return "{}: {} ({}) {:.2f}".format(det.class_name, value, percent, det.conf)
+        percent = "{:.0f}%".format(max(0.0, min(1.0, fraction)) * 100.0)
+    text = "{}: {} ({}) {:.2f}".format(det.class_name, value, percent, det.conf)
+    if message:
+        text += " " + message
+    return text
 
 
 class PoseDetector:
@@ -325,3 +344,263 @@ class PoseDetector:
                 message=message,
             ))
         return detections
+
+
+def _safe_name(text) -> str:
+    text = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(text)).strip(" .")
+    return text[:40] or "gauge"
+
+
+@dataclass
+class GaugeTemplate:
+    class_name: str
+    axis: np.ndarray
+    min_point: np.ndarray
+    max_point: np.ndarray
+    radius: float = 190.0
+    created_at: str = ""
+
+    def to_dict(self):
+        return {
+            "class_name": self.class_name,
+            "axis": [round(float(v), 3) for v in self.axis],
+            "min_point": [round(float(v), 3) for v in self.min_point],
+            "max_point": [round(float(v), 3) for v in self.max_point],
+            "radius": float(self.radius),
+            "created_at": self.created_at or datetime.now().isoformat(timespec="seconds"),
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        axis = np.asarray(data["axis"], dtype=float)
+        min_point = np.asarray(data["min_point"], dtype=float)
+        max_point = np.asarray(data["max_point"], dtype=float)
+        if axis.shape != (2,) or min_point.shape != (2,) or max_point.shape != (2,):
+            raise ValueError("模板点格式错误")
+        return cls(str(data.get("class_name", "gauge")), axis, min_point, max_point,
+                   float(data.get("radius", 190.0)),
+                   str(data.get("created_at", "")))
+
+
+class GaugeTemplateStore:
+    def __init__(self, output_root, model_path):
+        stem = _safe_name(Path(model_path).stem)
+        self.directory = Path(output_root) / "仪表识别" / stem / "templates"
+        self._cache = {}
+
+    def path_for(self, class_name: str) -> Path:
+        return self.directory / (_safe_name(class_name) + ".json")
+
+    def load(self, class_name: str) -> Optional[GaugeTemplate]:
+        if class_name in self._cache:
+            return self._cache[class_name]
+        path = self.path_for(class_name)
+        if not path.is_file():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                template = GaugeTemplate.from_dict(json.load(handle))
+            self._cache[class_name] = template
+            return template
+        except Exception:
+            return None
+
+    def save(self, template: GaugeTemplate) -> Optional[Path]:
+        self._cache[template.class_name] = template
+        path = self.path_for(template.class_name)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8") as handle:
+                json.dump(template.to_dict(), handle, ensure_ascii=False, indent=2)
+            return path
+        except OSError:
+            return None
+
+    def clear(self) -> None:
+        self._cache.clear()
+        try:
+            for path in self.directory.glob("*.json"):
+                path.unlink()
+        except OSError:
+            pass
+
+
+def _unit_angle(axis, point) -> float:
+    return math.atan2(point[1] - axis[1], point[0] - axis[0])
+
+
+def _template_point(center, radius, angle):
+    return center + radius * np.array([math.cos(angle), math.sin(angle)], dtype=float)
+
+
+@dataclass
+class GaugeReading:
+    detection: GaugeDetection
+    warped: np.ndarray
+    matrix: np.ndarray
+    template: GaugeTemplate
+    fraction: Optional[float] = None
+    value: Optional[float] = None
+    unit: str = ""
+    angle_deg: Optional[float] = None
+    on_scale: bool = False
+    message: str = ""
+
+
+def estimate_pointer_angle(warped, center=(256.0, 256.0),
+                           prior: float = 0.0, radius: float = 190.0,
+                           search_deg: float = 22.0, samples: int = 91):
+    """在正视空间里沿射线找最暗的指针方向（Radon 式），prior 为模型尖端方向。"""
+    gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+    if float(gray.std()) < 1.0:
+        return prior, 0.0
+    center = np.asarray(center, dtype=np.float32)
+    radii = np.arange(radius * 0.15, radius * 0.95, 1.0, dtype=np.float32)
+    if radii.size < 10:
+        return prior, 0.0
+    prior = _wrap(prior)
+    angles = np.linspace(prior - math.radians(search_deg),
+                         prior + math.radians(search_deg), samples)
+    def ray_score(angle):
+        xs = center[0] + radii * math.cos(angle)
+        ys = center[1] + radii * math.sin(angle)
+        values = cv2.remap(
+            gray, xs.reshape(1, -1), ys.reshape(1, -1),
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE)
+        return float(np.mean(255.0 - values))
+
+    best_angle = prior
+    best_score = -1.0
+    prior_score = ray_score(prior)
+    for angle in angles:
+        try:
+            score = ray_score(angle)
+        except cv2.error:
+            continue
+        if score > best_score:
+            best_score = score
+            best_angle = angle
+    # 只有明显比模型尖端方向更暗时才采用 Radon 结果，避免被刻度线带偏
+    if best_score >= prior_score + 1.0:
+        return _wrap(best_angle), best_score
+    return prior, prior_score
+
+
+class GaugeRectifier:
+    """用 3 个静态点（轴、最小、最大）做仿射正视化，tip 只参与指针角度。"""
+
+    SIZE = 512
+    CENTER = np.array([256.0, 256.0], dtype=float)
+    RADIUS = 190.0
+
+    def __init__(self, output_root, model_path, settings: GaugeSettings):
+        self.settings = settings
+        self.store = GaugeTemplateStore(output_root, model_path)
+        self.last_message = ""
+
+    def _calibrate(self, detection: GaugeDetection) -> GaugeTemplate:
+        axis = np.asarray(detection.keypoints[0], dtype=float)
+        min_point = np.asarray(detection.keypoints[2], dtype=float)
+        max_point = np.asarray(detection.keypoints[3], dtype=float)
+        box = detection.box
+        box_min = min(max(1.0, box[2] - box[0]), max(1.0, box[3] - box[1]))
+        if keypoint_radius(detection.keypoints) < max(12.0, 0.10 * box_min):
+            raise ValueError("关键点过于集中，无法标定模板")
+        min_angle = _unit_angle(axis, min_point)
+        max_angle = _unit_angle(axis, max_point)
+        if abs(_wrap(max_angle - min_angle)) < math.radians(5.0):
+            raise ValueError("最小/最大刻度角度过小，无法标定模板")
+        template = GaugeTemplate(
+            class_name=detection.class_name,
+            axis=self.CENTER.copy(),
+            min_point=_template_point(self.CENTER, self.RADIUS, min_angle),
+            max_point=_template_point(self.CENTER, self.RADIUS, max_angle),
+            radius=self.RADIUS,
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        self.store.save(template)
+        self.last_message = "已自动标定模板：{}".format(template.class_name)
+        return template
+
+    def template_for(self, detection: GaugeDetection) -> GaugeTemplate:
+        template = self.store.load(detection.class_name)
+        if template is None:
+            template = self._calibrate(detection)
+        return template
+
+    def recalibrate(self, detections) -> int:
+        count = 0
+        for detection in detections:
+            if float(detection.keypoint_conf.min()) < self.settings.kpt_conf:
+                continue
+            if detection.message and "关键点" in detection.message:
+                continue
+            try:
+                self._calibrate(detection)
+                count += 1
+            except Exception:
+                continue
+        if count:
+            self.last_message = "已重新标定 {} 类模板".format(count)
+        return count
+
+    def rectify(self, frame, detection: GaugeDetection) -> Optional[GaugeReading]:
+        if detection.keypoints.shape != (4, 2):
+            return None
+        if float(detection.keypoint_conf.min()) < self.settings.kpt_conf:
+            return None
+        invalid_prefixes = (
+            "关键点置信度低", "关键点过于集中",
+            "最小/最大刻度离旋转轴太近", "指针尖端离旋转轴太近",
+            "最小和最大刻度几乎重合",
+        )
+        if detection.message and any(
+                detection.message.startswith(prefix) for prefix in invalid_prefixes):
+            # 关键点/几何无效，不用它标定或读数；刻度弧外仍允许正视化后重算
+            return None
+        try:
+            template = self.template_for(detection)
+        except Exception as error:
+            self.last_message = str(error)
+            return None
+        src = np.float32([
+            detection.keypoints[0], detection.keypoints[2], detection.keypoints[3]])
+        dst = np.float32([
+            template.axis, template.min_point, template.max_point])
+        try:
+            matrix = cv2.getAffineTransform(src, dst)
+            warped = cv2.warpAffine(
+                frame, matrix, (self.SIZE, self.SIZE),
+                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            tip = cv2.transform(
+                np.array([[detection.keypoints[1]]], dtype=np.float32),
+                matrix)[0][0]
+        except cv2.error:
+            return None
+        axis = template.axis
+        prior = math.atan2(tip[1] - axis[1], tip[0] - axis[0])
+        angle = prior
+        if self.settings.pointer == "radon":
+            angle, _score = estimate_pointer_angle(
+                warped, tuple(axis), prior, template.radius)
+        tip_point = _template_point(axis, template.radius, angle)
+        fraction, on_scale, angle_deg, _amin, _amax, _dir, _sweep, message = \
+            compute_fraction(axis, tip_point, template.min_point,
+                             template.max_point, self.settings.arc)
+        vmin, vmax, unit = self.settings.range_for(detection.class_name)
+        value = None
+        if fraction is not None and on_scale:
+            value = vmin + max(0.0, min(1.0, fraction)) * (vmax - vmin)
+        return GaugeReading(
+            detection=detection,
+            warped=warped,
+            matrix=matrix,
+            template=template,
+            fraction=fraction,
+            value=value,
+            unit=unit,
+            angle_deg=angle_deg,
+            on_scale=on_scale,
+            message=message,
+        )

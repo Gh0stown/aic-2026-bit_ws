@@ -204,16 +204,30 @@ CLI 自动扫描默认会先打印摘要并等回车确认；`--yes` 跳过。
 
 针对圆形温度/湿度表：模型 `~/AI视觉/Pose.pt` 输出 4 个关键点：
 
-- 0 = 指针旋转轴
-- 1 = 指针尖端
-- 2 = 量程最小值刻度
-- 3 = 量程最大值刻度
+- 0 = 指针旋转轴（静态）
+- 1 = 指针尖端（动态）
+- 2 = 量程最小值刻度（静态）
+- 3 = 量程最大值刻度（静态）
 
-类别：`temperature` / `humidity`。读数计算：
+类别：`temperature` / `humidity`。
 
-1. 以旋转轴为圆心，求 尖端、最小刻度、最大刻度 的角度；
-2. 把指针投影到 最小 → 最大 的刻度弧上，得到 0~1 的比例；
-3. 按温度/湿度量程换算：`value = min + ratio * (max - min)`。
+### 正视化与读数
+
+当前 Pose.pt 只有 **3 个静态点**（轴、最小、最大），所以配准只用这 3 个点做
+**仿射 warp**，`tip` 绝对不参与配准：
+
+1. 第一次识别到某类表时自动标定模板：轴映射到 512×512 中心，最小/最大刻度按
+   实际角度映射到半径 190 的圆上，模板存到
+   `~/Pictures/photo_capture/仪表识别/<模型名>/templates/<类别>.json`；
+2. 每帧只把当前 轴/最小/最大 映射到模板三点，`cv2.warpAffine` 得到 512×512 正视图；
+3. 在正视空间里用 Radon（沿射线找最暗的指针线）算指针角度，`tip` 只作为搜索先验，
+   Radon 不明显更优时回退到 `tip`；
+4. 按模板里的最小/最大刻度弧算比例，再按量程换算读数。
+
+因为 `tip` 不参与 warp，指针转动不会改变正视化图像，也就不会出现“每帧模板不同导致读数飘”。
+
+> 3 点只能做仿射，强斜视时仍有透视误差；要做到真正的 4 点单应，需要给 Pose 模型
+> 再加一个**静态**关键点（logo、螺丝、固定刻字、底边中点等）。当前版本不把 tip 当第四点。
 
 默认量程是 `0–100`（温度 °C、湿度 %RH），**请按实际表盘改**：
 
@@ -224,28 +238,34 @@ rosrun photo_capture capture_photos.py --mode gauge \
 ```
 
 常见表计的刻度从最小值经顶部绕到最大值，默认用**长弧** `--gauge-arc long`；
-如果表盘是短弧，换 `short`，拿不准用 `auto`。
+如果表盘是短弧，换 `short`，拿不准用 `auto`。指针角度默认 `--gauge-pointer radon`，
+也可以切 `tip` 直接使用模型尖端。Radon 假设指针比表盘暗；如果指针是亮色/强反光，
+优先用 `tip` 或调整光照。
 
 ### 界面操作
 
 | 操作 | 说明 |
 | --- | --- |
 | 点「更换模型」 / `M` | 换一个 `.pt`（必须是 pose 任务） |
+| 点「重新标定」 / `T` | 用当前检测覆盖该类别的正视化模板 |
+| 点「正视化」 / `V` | 查看 512×512 正视化图像 |
 | 点「保存当前帧」 / `S` | 保存带关键点和读数的截图 |
 | 点「保存读数」 / `R` | 把当前读数追加到 `readings.jsonl` |
 | 点「打开记录目录」 | 打开当前模型的记录目录 |
 | `Esc` / 关窗口 | 退出 |
 
+第一次使用建议让表盘正对相机，等识别稳定后按 `T` 标定一次；模板不对时也按 `T` 覆盖。
 截图和读数保存到：
 
 ```
 ~/Pictures/photo_capture/仪表识别/<模型名>/
 ├── snapshots/<模型名>_YYYYmmdd_HHMMSS_mmm.jpg
+├── templates/<类别>.json
 └── readings.jsonl
 ```
 
 `readings.jsonl` 每行是一条记录，包含时间、模型、类别、读数、量程比例、指针角度、
-目标置信度、关键点坐标和关键点置信度。
+目标置信度、关键点坐标、关键点置信度和模板名。
 
 ### 命令行
 
@@ -253,16 +273,17 @@ rosrun photo_capture capture_photos.py --mode gauge \
 rosrun photo_capture capture_photos.py --no-gui --mode gauge \
   --pose-model ~/AI视觉/Pose.pt --gauge-conf 0.5 --gauge-kpt-conf 0.3
 
-# 指定量程和弧
+# 指定量程、弧和指针算法
 rosrun photo_capture capture_photos.py --no-gui --mode gauge \
   --gauge-temp-min 0 --gauge-temp-max 50 --gauge-humidity-min 20 --gauge-humidity-max 90 \
-  --gauge-arc long
+  --gauge-arc long --gauge-pointer radon
 ```
 
-终端每秒打印一次，`Ctrl+C` 退出。没有图形界面时只打印，不保存截图/JSONL。
+终端每秒打印一次，`Ctrl+C` 退出。没有图形界面时只打印，不保存截图/JSONL；模板仍会
+自动标定到输出目录下。
 
 > 模型必须是 pose 任务；选错普通检测模型会提示“所选模型不是 pose 模型”。
-> 关键点置信度低于 `--gauge-kpt-conf` 时不会算读数，界面会显示原因。
+> 关键点置信度低于 `--gauge-kpt-conf`、或关键点挤成一团时不会算读数，界面/终端会显示原因。
 
 ## 常用参数
 
@@ -305,6 +326,7 @@ rosrun photo_capture capture_photos.py --no-gui --mode gauge \
 | `--gauge-conf` | `0.5` | 仪表目标置信度 |
 | `--gauge-kpt-conf` | `0.3` | 4 个关键点的最低置信度 |
 | `--gauge-arc` | `long` | `long` / `short` / `auto` 刻度弧 |
+| `--gauge-pointer` | `radon` | `radon` 正视化后射线搜索 / `tip` 模型尖端 |
 | `--gauge-temp-min` | `0` | 温度量程下限 |
 | `--gauge-temp-max` | `100` | 温度量程上限 |
 | `--gauge-humidity-min` | `0` | 湿度量程下限 |
@@ -344,6 +366,7 @@ YOLO 裁剪图（按模型 / 类别）：
 
 ```
 <输出目录>/仪表识别/<模型名>/snapshots/*.jpg
+<输出目录>/仪表识别/<模型名>/templates/<类别>.json
 <输出目录>/仪表识别/<模型名>/readings.jsonl
 ```
 
@@ -364,6 +387,7 @@ YOLO 裁剪图（按模型 / 类别）：
 - **模型测试/全景检测报没有 ultralytics**：`pip3 install ultralytics`，并确认用的是同一个 Python。
 - **仪表识别报“不是 pose 模型”**：要用 Pose.pt 这类姿态权重，不能选普通检测模型。
 - **仪表读数不对**：先确认量程（`--gauge-temp-min/max`、`--gauge-humidity-min/max`）和
-  刻度弧（`long/short/auto`）；默认长弧适合大多数圆形表。
+  刻度弧（`long/short/auto`）；默认长弧适合大多数圆形表。第一次模板标定最好正对表盘，
+  模板不好时按 `T` 重标；强斜视需要给模型加静态第 5 点后做 4 点单应。
 - **CPU 上很慢**：`--imgsz 416`，或关掉其他占 CPU 的程序；有 GPU 用 `--infer-device cuda`。
 - **中文类别显示成方块**：脚本自动找 Noto CJK / 文泉驿字体；找不到时只画框、不画文字。
