@@ -64,3 +64,24 @@ rosrun nav_demo waypoint_gui.py               # 图形界面
 
 - 用 `record_waypoint.py` 的 `--yaw route` 选项把朝向也对齐到路线切线；
 - 把点直接吸到“墙内 20 cm 的等距线”上（对这张只有墙的地图，可以用距离变换自动生成中线）。
+
+## 巡航脚本（已实现：cruise_waypoints.py）
+
+按路线顺序自动跑点位：普通点用 move_base 开到 `(x, y, 到达朝向)`，识别点再原地转向
+`tasks` 里的每个朝向；**14→18 段不用 move_base**，改成参考 photo_capture 的麦轮平移：
+只发 `linear.y`、0.06 m/s、`/odom` 闭环、到距离停，车头保持 180°；到 15/17 再原地
+转向识别，识别完转回 180° 继续平移。
+
+```bash
+# 只看计划（不动车）
+rosrun nav_demo cruise_waypoints.py --route fast --dry-run
+
+# 实跑，每个识别朝向停 3 秒
+rosrun nav_demo cruise_waypoints.py --route fast --dwell 3
+```
+
+- 路线顺序：`src/nav_demo/config/inspection_routes.yaml`（left / right / fast）
+- 点位与识别朝向：`src/nav_demo/waypoints/inspection_waypoints.yaml`
+- 平移相关参数：`--strafe-ids 14,15,16,17,18`、`--strafe-speed 0.06`、`--no-strafe`
+- 退出（Ctrl-C）会取消 move_base 目标，避免脚本停了车还在跑
+- 配套：`newt.py` 以 20Hz 重发最后速度、0.5s 无指令自动归零、退出发零速
