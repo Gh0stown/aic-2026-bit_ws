@@ -325,6 +325,12 @@ class WaypointGui(object):
             'yaw_deg': round(math.degrees(pose[2]), 1),
             'stamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         }
+        # 重新录点时保留已有的识别任务/备注，避免覆盖掉
+        old = self.recorded.get(pid)
+        if old:
+            for key in ('tasks', 'note'):
+                if key in old:
+                    entry[key] = old[key]
         self.recorded[pid] = entry
         try:
             self._save()

@@ -1,0 +1,223 @@
+# 巡检点位坐标 + 识别朝向（waypoint_gui.py 生成；tasks 为到点后转向的识别朝向）
+frame_id: map
+map: mymap_20261106_1916_clean.pgm
+points:
+- id: 0
+  name: 初始点位
+  x: 0.013
+  y: -0.002
+  yaw: 0.0002
+  yaw_deg: 0.0
+  stamp: '2026-11-07 12:07:16'
+  tasks: []
+- id: 1
+  name: 红绿灯 1 识别点位
+  x: 1.117
+  y: -0.004
+  yaw: -0.0057
+  yaw_deg: -0.3
+  stamp: '2026-11-07 12:07:32'
+  tasks:
+  - name: 红绿灯 1 识别
+    yaw: 0.0
+    yaw_deg: 0
+- id: 2
+  name: A 街区北方识别点位
+  x: 2.689
+  y: 0.026
+  yaw: -0.0377
+  yaw_deg: -2.2
+  stamp: '2026-11-07 12:07:58'
+  tasks:
+  - name: A 街区北方识别
+    yaw: 1.5708
+    yaw_deg: 90
+- id: 3
+  name: 左上方拐角点位
+  x: 3.386
+  y: 0.031
+  yaw: 0.056
+  yaw_deg: 3.2
+  stamp: '2026-11-07 12:08:22'
+  tasks: []
+- id: 4
+  name: A 街区西方识别点位（禁止通行指示牌识别点位）
+  x: 3.392
+  y: 0.597
+  yaw: 1.5065
+  yaw_deg: 86.3
+  stamp: '2026-11-07 12:08:50'
+  note: 同一位置，两个任务：A 街区西方识别 + 禁止通行指示牌识别
+  tasks:
+  - name: A 街区西方识别
+    yaw: 3.1416
+    yaw_deg: 180
+  - name: 禁止通行指示牌识别
+    yaw: 1.5708
+    yaw_deg: 90
+- id: 5
+  name: 左中拐角点位
+  x: 3.383
+  y: 1.229
+  yaw: 1.4626
+  yaw_deg: 83.8
+  stamp: '2026-11-07 12:10:38'
+  note: 位于 4 号与 6 号之间的拐角
+  tasks: []
+- id: 6
+  name: A 街区南方识别点位
+  x: 2.589
+  y: 1.173
+  yaw: -3.098
+  yaw_deg: -177.5
+  stamp: '2026-11-07 12:09:32'
+  tasks:
+  - name: A 街区南方识别
+    yaw: -1.5708
+    yaw_deg: -90
+  - name: B 街区北方识别
+    yaw: 1.5708
+    yaw_deg: 90
+- id: 7
+  name: 中心拐角点位
+  x: 1.81
+  y: 1.252
+  yaw: 3.0882
+  yaw_deg: 176.9
+  stamp: '2026-11-07 12:11:36'
+  tasks:
+  - name: 楼宇 A 识别
+    yaw: 3.1416
+    yaw_deg: 180
+- id: 8
+  name: B 街区东方识别点位
+  x: 1.83
+  y: 1.827
+  yaw: 1.4113
+  yaw_deg: 80.9
+  stamp: '2026-11-07 12:11:58'
+  tasks:
+  - name: B 街区东方识别
+    yaw: 0.0
+    yaw_deg: 0
+  - name: 楼宇 C 识别
+    yaw: 3.1416
+    yaw_deg: 180
+  - name: 红绿灯 2 识别
+    yaw: 1.5708
+    yaw_deg: 90
+- id: 9
+  name: 中下方拐角点位
+  x: 2.024
+  y: 3.46
+  yaw: 1.444
+  yaw_deg: 82.7
+  stamp: '2026-11-07 12:12:21'
+  tasks: []
+- id: 10
+  name: 站房识别点位
+  x: 2.742
+  y: 3.369
+  yaw: -0.1978
+  yaw_deg: -11.3
+  stamp: '2026-11-07 12:12:56'
+  tasks:
+  - name: 站房识别
+    yaw: -1.5708
+    yaw_deg: -90
+- id: 11
+  name: 左下方拐角点位
+  x: 3.347
+  y: 3.338
+  yaw: 0.0379
+  yaw_deg: 2.2
+  stamp: '2026-11-07 12:15:26'
+  tasks: []
+- id: 12
+  name: 楼宇 D 识别点位
+  x: 3.334
+  y: 2.689
+  yaw: -1.6037
+  yaw_deg: -91.9
+  stamp: '2026-11-07 12:16:00'
+  tasks:
+  - name: 楼宇 D 识别
+    yaw: 3.1416
+    yaw_deg: 180
+- id: 13
+  name: B 街区西方识别点位
+  x: 3.354
+  y: 1.795
+  yaw: -1.564
+  yaw_deg: -89.6
+  stamp: '2026-11-07 12:16:14'
+  tasks:
+  - name: B 街区西方识别
+    yaw: -1.5708
+    yaw_deg: -90
+- id: 14
+  name: 1 号停车位识别点位
+  x: 0.621
+  y: 3.365
+  yaw: -3.13
+  yaw_deg: -179.3
+  stamp: '2026-11-07 12:18:16'
+  tasks:
+  - name: 1 号停车位识别
+    yaw: 3.1416
+    yaw_deg: 180
+- id: 15
+  name: 垃圾桶识别点位
+  x: 0.61
+  y: 2.768
+  yaw: -3.0977
+  yaw_deg: -177.5
+  stamp: '2026-11-07 12:18:43'
+  tasks:
+  - name: 垃圾桶识别
+    yaw: 3.1416
+    yaw_deg: 180
+  - name: 2 号停车位识别
+    yaw: 3.1416
+    yaw_deg: 180
+- id: 16
+  name: 3 号停车位识别点位
+  x: 0.636
+  y: 2.141
+  yaw: -3.1348
+  yaw_deg: -179.6
+  stamp: '2026-11-07 12:19:09'
+  tasks:
+  - name: 3 号停车位识别
+    yaw: 3.1416
+    yaw_deg: 180
+- id: 17
+  name: 楼宇 B 识别点位
+  x: 0.569
+  y: 1.572
+  yaw: -3.0532
+  yaw_deg: -174.9
+  stamp: '2026-11-07 12:20:06'
+  tasks:
+  - name: 楼宇 B 识别
+    yaw: 3.1416
+    yaw_deg: 180
+  - name: 电动车识别起始
+    yaw: 1.5708
+    yaw_deg: 90
+- id: 18
+  name: 终点前点位
+  x: 0.725
+  y: -0.14
+  yaw: -3.0726
+  yaw_deg: -176.0
+  stamp: '2026-11-07 12:20:34'
+  tasks: []
+- id: 19
+  name: 结束点位
+  x: 0.106
+  y: -0.181
+  yaw: -3.0687
+  yaw_deg: -175.8
+  stamp: '2026-11-07 12:20:45'
+  tasks: []

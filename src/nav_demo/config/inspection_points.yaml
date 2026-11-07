@@ -5,16 +5,16 @@
 #       如果实测发现并不是同一个位置，可以在界面里用“自定义点位”单独记录。
 frame_id: map
 points:
-  - {id: 0,  name: "初始点位", note: "与 19 号同一点", guess: false}
-  - {id: 1,  name: "红绿灯 1 识别点位", note: "", guess: false}
-  - {id: 2,  name: "A 街区北方识别点位", note: "", guess: false}
-  - {id: 3,  name: "左上方拐角点位", note: "位于 A 街区北方与西方之间", guess: false}
-  - {id: 4,  name: "A 街区西方识别点位", note: "", guess: false}
-  - {id: 5,  name: "禁止通行指示牌识别点位", note: "", guess: false}
-  - {id: 6,  name: "A 街区南方识别点位", note: "括号里是 B 街区北方识别点位（推测同一位置）", guess: true}
-  - {id: 7,  name: "中心拐角点位", note: "括号里是楼宇 A 识别点位（推测同一位置）", guess: true}
-  - {id: 8,  name: "B 街区东方识别点位", note: "括号里是楼宇 C、红绿灯 2（推测同一位置）", guess: true}
-  - {id: 9,  name: "中下方拐角点位", note: "", guess: false}
+  - {id: 0, name: "初始点位", note: "与 19 号同一点", guess: false}
+  - {id: 1, name: "红绿灯 1 识别点位", note: "", guess: false}
+  - {id: 2, name: "A 街区北方识别点位", note: "", guess: false}
+  - {id: 3, name: "左上方拐角点位", note: "位于 A 街区北方与西方之间", guess: false}
+  - {id: 4, name: "A 街区西方识别点位（禁止通行指示牌识别点位）", note: "同一位置，两个任务：A 街区西方识别 + 禁止通行指示牌识别", guess: false}
+  - {id: 5, name: "左中拐角点位", note: "位于 4 号与 6 号之间的拐角", guess: false}
+  - {id: 6, name: "A 街区南方识别点位", note: "括号里是 B 街区北方识别点位（推测同一位置）", guess: true}
+  - {id: 7, name: "中心拐角点位", note: "括号里是楼宇 A 识别点位（推测同一位置）", guess: true}
+  - {id: 8, name: "B 街区东方识别点位", note: "括号里是楼宇 C、红绿灯 2（推测同一位置）", guess: true}
+  - {id: 9, name: "中下方拐角点位", note: "", guess: false}
   - {id: 10, name: "站房识别点位", note: "", guess: false}
   - {id: 11, name: "左下方拐角点位", note: "位于楼宇 D 与站房之间", guess: false}
   - {id: 12, name: "楼宇 D 识别点位", note: "", guess: false}
