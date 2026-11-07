@@ -153,8 +153,8 @@ points:
   stamp: '2026-11-07 12:16:14'
   tasks:
   - name: B 街区西方识别
-    yaw: -1.5708
-    yaw_deg: -90
+    yaw: 3.1416
+    yaw_deg: 180
 - id: 14
   name: 1 号停车位识别点位
   x: 0.621
@@ -174,12 +174,12 @@ points:
   yaw_deg: -177.5
   stamp: '2026-11-07 12:18:43'
   tasks:
-  - name: 垃圾桶识别
-    yaw: 3.1416
-    yaw_deg: 180
   - name: 2 号停车位识别
     yaw: 3.1416
     yaw_deg: 180
+  - name: 垃圾桶识别
+    yaw: 0.0
+    yaw_deg: 0
 - id: 16
   name: 3 号停车位识别点位
   x: 0.636
@@ -200,11 +200,11 @@ points:
   stamp: '2026-11-07 12:20:06'
   tasks:
   - name: 楼宇 B 识别
+    yaw: 0.0
+    yaw_deg: 0
+  - name: 电动车识别起始
     yaw: 3.1416
     yaw_deg: 180
-  - name: 电动车识别起始
-    yaw: 1.5708
-    yaw_deg: 90
 - id: 18
   name: 终点前点位
   x: 0.725
