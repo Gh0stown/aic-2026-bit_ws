@@ -1,0 +1,27 @@
+# 巡检点位预设（来源：巡检点位记录.md，共 20 个点位，0 与 19 为同一物理位置）
+#
+# 用途：waypoint_gui.py 启动时读取本文件，生成可选点位列表。
+# 注意：括号内的并列名称表示“同一物理位置承担多个识别任务”，是推测；
+#       如果实测发现并不是同一个位置，可以在界面里用“自定义点位”单独记录。
+frame_id: map
+points:
+  - {id: 0,  name: "初始点位", note: "与 19 号同一点", guess: false}
+  - {id: 1,  name: "红绿灯 1 识别点位", note: "", guess: false}
+  - {id: 2,  name: "A 街区北方识别点位", note: "", guess: false}
+  - {id: 3,  name: "左上方拐角点位", note: "位于 A 街区北方与西方之间", guess: false}
+  - {id: 4,  name: "A 街区西方识别点位", note: "", guess: false}
+  - {id: 5,  name: "禁止通行指示牌识别点位", note: "", guess: false}
+  - {id: 6,  name: "A 街区南方识别点位", note: "括号里是 B 街区北方识别点位（推测同一位置）", guess: true}
+  - {id: 7,  name: "中心拐角点位", note: "括号里是楼宇 A 识别点位（推测同一位置）", guess: true}
+  - {id: 8,  name: "B 街区东方识别点位", note: "括号里是楼宇 C、红绿灯 2（推测同一位置）", guess: true}
+  - {id: 9,  name: "中下方拐角点位", note: "", guess: false}
+  - {id: 10, name: "站房识别点位", note: "", guess: false}
+  - {id: 11, name: "左下方拐角点位", note: "位于楼宇 D 与站房之间", guess: false}
+  - {id: 12, name: "楼宇 D 识别点位", note: "", guess: false}
+  - {id: 13, name: "B 街区西方识别点位", note: "", guess: false}
+  - {id: 14, name: "1 号停车位识别点位", note: "", guess: false}
+  - {id: 15, name: "垃圾桶识别点位", note: "括号里是 2 号停车位识别点位（推测同一位置）", guess: true}
+  - {id: 16, name: "3 号停车位识别点位", note: "", guess: false}
+  - {id: 17, name: "楼宇 B 识别点位", note: "括号里是电动车识别起始点位（推测同一位置）", guess: true}
+  - {id: 18, name: "终点前点位", note: "", guess: false}
+  - {id: 19, name: "结束点位", note: "与 0 号同一点", guess: false}

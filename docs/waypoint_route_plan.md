@@ -17,11 +17,28 @@
 | 文件 | 作用 |
 |---|---|
 | `src/nav_demo/scripts/record_waypoint.py` | 遥控到满意位置后按回车（或调 `/record_waypoint` 服务）记录 map 坐标下的 x/y/yaw，写入 `nav_demo/waypoints/waypoints.yaml` |
+| `src/nav_demo/scripts/waypoint_gui.py` | 巡检点位图形化记录：左侧 20 个预设点位，右侧地图实时显示位姿，选中点位后一键记录；支持自定义点位；输出 `nav_demo/waypoints/inspection_waypoints.yaml` |
+| `src/nav_demo/config/inspection_points.yaml` | 巡检点位预设（0~19 号，来源《巡检点位记录.md》） |
 | `src/nav_demo/scripts/snap_waypoints.py` | 把录好的点投影到预设路线上，输出 `waypoints_snapped.yaml`；超过 `--max-dist` 的点保持原样并告警 |
 | `src/nav_demo/config/safe_routes.yaml` | 预设路线文件（目前是空模板，等真实路线坐标） |
 
 `record_waypoint.py` 已用模拟 TF 做过功能验证（x/y/yaw 正确），尚未实车测试。
+`waypoint_gui.py` 已用模拟 TF 自测：建界面、记录 0 号点、写 YAML 均正常，尚未实车测试。
 `snap_waypoints.py` 已用合成数据验证投影逻辑。
+
+### 巡检点位图形化记录
+
+```bash
+roslaunch ~/bit_ws/src/nav777.launch          # 地图 + AMCL
+roslaunch mbot_teleop mbot_teleop.launch      # 遥控
+rosrun nav_demo waypoint_gui.py               # 图形界面
+```
+
+- 左侧选中点位 → 点“记录当前位姿”；已记录的点状态列显示“已记”；
+- 预设点位括号里的并列任务（6/7/8/15/17）如果实测发现不是同一位置，
+  用底部“预设里没有的点位”输入名字单独记录，例如 `6-B街区北方`；
+- 0 号与 19 号是同一位置，两个都记一遍即可（或记完手动复制坐标）；
+- 输出文件的每条记录带 id / name / x / y / yaw / yaw_deg / 时间戳。
 
 ## 暂缓的方案：把标点收敛到预设安全路线
 
