@@ -1,0 +1,32 @@
+# 预设安全路线（map 坐标系，单位米）
+#
+# 每条路线是 map 坐标系下的一串 (x, y) 折线点，按行进顺序排列。
+# 录完航点后运行：
+#     rosrun nav_demo snap_waypoints.py --route route_left
+# 会把 nav_demo/waypoints/waypoints.yaml 里的航点投影到最近的路线点上，
+# 输出 nav_demo/waypoints/waypoints_snapped.yaml。
+#
+# 坐标怎么取：
+#   1. 场地 pgm 地图确定后，在 rviz 里对着走廊中线用 "Publish Point" 取点；
+#   2. 或由脚本从 pgm 的自由区自动提取中线（需要时再加）。
+#
+# 注意：两条路线（左/右）点位相同，只是经过顺序不同，所以这里按
+#       比赛给的两张路线图各写一条，点位名称/顺序可以不一样。
+frame_id: map
+
+# 默认吸附半径（米），命令行 --max-dist 可覆盖
+snap_tolerance: 0.30
+
+# 示例（等场地地图确定后，把下面的注释去掉并换成真实坐标）：
+# routes:
+#   route_left:
+#     - [0.00, 0.00]
+#     - [1.20, 0.00]
+#     - [1.20, 1.20]
+#     - [2.40, 1.20]
+#   route_right:
+#     - [0.00, 0.00]
+#     - [0.00, 1.20]
+#     - [1.20, 1.20]
+#     - [2.40, 1.20]
+routes: {}

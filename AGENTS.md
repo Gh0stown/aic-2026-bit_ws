@@ -42,7 +42,8 @@ git status -sb             # 确认显示 ## main...origin/main，且没有 ahea
 - 建图：
   - gmapping：`src/gmapping.launch`、`src/car_bringup/launch/gmapping.launch`
   - karto：`src/car_bringup/launch/karto.launch`（主文件，参数在这里改），入口 `src/karto.launch`
-- 导航：`src/nav777.launch`，默认加载基线地图 `src/nav_demo/map/mymap_20261106_1916.yaml`（karto，0.025m），可用 `map:=` 覆盖。
+- 导航：`src/nav777.launch`，默认加载基线地图 `src/nav_demo/map/mymap_20261106_1916_clean.yaml`（karto，0.025m），可用 `map:=` 覆盖。
+- 场地与航点：场地 4.4m × 4.4m，pgm 里只有四周墙体、道路（60cm）没有内部特征；航点记录 `src/nav_demo/scripts/record_waypoint.py`，收敛到预设路线 `src/nav_demo/scripts/snap_waypoints.py`（路线文件 `src/nav_demo/config/safe_routes.yaml`，目前为空）。方案说明与暂缓原因见 `docs/waypoint_route_plan.md`。
 - 参数目录：`src/nav_demo/param/`（代价地图、DWA、全局规划器）。
 - 保存地图：`src/nav_demo/scripts/save_map.sh`，按时间戳命名，不覆盖旧图。
 - 使用说明速查：`~/桌面/readme.txt`。
