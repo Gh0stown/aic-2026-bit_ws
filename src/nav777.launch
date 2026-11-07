@@ -1,8 +1,8 @@
 <!-- 集成导航相关的 launch 文件 -->
 <launch>
 
-    <!-- 基线地图：默认加载最新 karto 建图结果（0.025m），可用 map:=xxx.yaml 覆盖 -->
-    <arg name="map" default="mymap_20261106_1916.yaml" />
+    <!-- 基线地图：默认加载清理过墙外杂点的 karto 地图（0.025m），可用 map:=xxx.yaml 覆盖 -->
+    <arg name="map" default="mymap_20261106_1916_clean.yaml" />
 
     <!-- 地图服务 -->
     <include file="$(find nav_demo)/launch/nav03_map_server.launch">
