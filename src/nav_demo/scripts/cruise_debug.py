@@ -431,6 +431,8 @@ class CruiseWorker(threading.Thread):
         timeout = 8.0 + abs(self._norm_angle(target - pose[2])) / 0.2
         started = time.monotonic()
         paused = 0.0
+        best_err = abs(self._norm_angle(target - pose[2]))
+        last_progress = time.monotonic()
         rate = rospy.Rate(20)
         try:
             while not self._stop_evt.is_set():
@@ -440,6 +442,7 @@ class CruiseWorker(threading.Thread):
                     if not self._wait_if_paused():
                         return False
                     paused += time.monotonic() - t_pause
+                    last_progress = time.monotonic()
                     continue
                 pose = self._map_pose()
                 if pose is None:
@@ -448,11 +451,18 @@ class CruiseWorker(threading.Thread):
                 err = self._norm_angle(target - pose[2])
                 if abs(err) <= 0.03:
                     return True
+                if abs(err) < best_err - 0.01:
+                    best_err = abs(err)
+                    last_progress = time.monotonic()
+                elif time.monotonic() - last_progress > 1.0:
+                    self.log('    旋转受阻（误差 %.1f°，1 秒没有改善）'
+                             % math.degrees(abs(err)))
+                    return False
                 if time.monotonic() - started - paused > timeout:
                     self.log('    转向超时（目标 %.0f°）' % math.degrees(target))
                     return False
                 # 比例控制，接近目标自动减速，避免一侧轮子突然发力
-                cmd = min(0.4, max(0.05, 1.5 * abs(err)))
+                cmd = min(0.4, max(0.12, 1.5 * abs(err)))
                 twist = Twist()
                 twist.angular.z = (1.0 if err > 0 else -1.0) * cmd
                 self._pub.publish(twist)
@@ -858,6 +868,14 @@ class App(object):
                 self.tree.selection_set(str(idx))
                 self.tree.see(str(idx))
         self._draw_pose()
+        # 一次巡航结束后重新放开“开始”，不用重启 GUI
+        if self.worker is not None and not self.worker.is_alive():
+            if str(self.start_btn['state']) == 'disabled':
+                self.start_btn.configure(state='normal')
+            if str(self.stop_btn['state']) == 'normal':
+                self.stop_btn.configure(state='disabled')
+                self.pause_btn.configure(state='disabled')
+                self.resume_btn.configure(state='disabled')
         if not self.calibrating and str(self.cal_btn['state']) == 'disabled':
             self.cal_btn.configure(state='normal')
         self.root.after(200, self._poll)
@@ -869,6 +887,8 @@ class App(object):
         if not self.plan:
             self._log('先载入计划')
             return
+        self.current_id = None
+        self._draw_highlight()
         dwell = float(self.dwell_var.get())
         speed = float(self.speed_var.get())
         self.log_file.write('\n===== 开始巡航 %s =====\n'

@@ -157,7 +157,7 @@ points:
     yaw_deg: 180
 - id: 14
   name: 1 号停车位识别点位
-  x: 0.485
+  x: 0.535
   y: 3.365
   yaw: -3.13
   yaw_deg: -179.3
@@ -168,7 +168,7 @@ points:
     yaw_deg: 180
 - id: 15
   name: 垃圾桶识别点位
-  x: 0.485
+  x: 0.535
   y: 2.768
   yaw: -3.0977
   yaw_deg: -177.5
@@ -182,7 +182,7 @@ points:
     yaw_deg: 0
 - id: 16
   name: 3 号停车位识别点位
-  x: 0.485
+  x: 0.535
   y: 2.141
   yaw: -3.1348
   yaw_deg: -179.6
@@ -193,7 +193,7 @@ points:
     yaw_deg: 180
 - id: 17
   name: 楼宇 B 识别点位
-  x: 0.485
+  x: 0.535
   y: 1.572
   yaw: -3.0532
   yaw_deg: -174.9
@@ -207,7 +207,7 @@ points:
     yaw_deg: 180
 - id: 18
   name: 终点前点位
-  x: 0.485
+  x: 0.535
   y: -0.003
   yaw: -3.0726
   yaw_deg: -176.0
