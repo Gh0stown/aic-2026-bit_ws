@@ -35,7 +35,7 @@ if THIS_DIR not in sys.path:
 
 from cruise_waypoints import (  # noqa: E402
     DEFAULT_POINTS, DEFAULT_ROUTES, DEFAULT_STRAFE_IDS,
-    angle_diff, build_plan, lateral_delta, load_yaml,
+    angle_diff, build_plan, is_strafe_leg, lateral_delta, load_yaml,
 )
 
 PKG_DIR = os.path.dirname(THIS_DIR)
@@ -440,12 +440,9 @@ class CruiseWorker(threading.Thread):
             for idx, step in enumerate(self.plan):
                 if self._stop_evt.is_set():
                     break
-                via_strafe = (prev is not None and prev['id'] in self.strafe_ids
-                              and step['id'] in self.strafe_ids)
+                via_strafe = is_strafe_leg(prev, step, self.strafe_ids)
                 next_step = self.plan[idx + 1] if idx + 1 < len(self.plan) else None
-                next_is_strafe = (next_step is not None
-                                  and step['id'] in self.strafe_ids
-                                  and next_step['id'] in self.strafe_ids)
+                next_is_strafe = is_strafe_leg(step, next_step, self.strafe_ids)
                 self._set_step('[%d/%d] %s %s' % (idx + 1, len(self.plan),
                                                   step['id'], step['name']),
                                step['id'], idx)
@@ -673,8 +670,7 @@ class App(object):
         self.tree.delete(*self.tree.get_children())
         prev = None
         for idx, step in enumerate(self.plan):
-            mode = '平移' if (prev is not None and prev['id'] in self._strafe_ids()
-                              and step['id'] in self._strafe_ids()) else 'move_base'
+            mode = '平移' if is_strafe_leg(prev, step, self._strafe_ids()) else 'move_base'
             tasks = ' → '.join('%s %.0f°' % (n, math.degrees(y)) for n, y in step['tasks']) \
                 or '—'
             self.tree.insert('', 'end', iid=str(idx),

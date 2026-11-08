@@ -76,15 +76,20 @@ def build_plan(points, order):
     return plan
 
 
+def is_strafe_leg(prev, step, strafe_ids):
+    """相邻两点都在平移点集里，且向下（y 减小）才走平移；反向走 move_base。"""
+    if prev is None:
+        return False
+    return (prev['id'] in strafe_ids and step['id'] in strafe_ids
+            and step['y'] < prev['y'] - 1e-6)
+
+
 def plan_modes(plan, strafe_ids):
     """给每一步标注到点方式：strafe / move_base。"""
     modes = []
     prev = None
     for step in plan:
-        if prev is not None and prev['id'] in strafe_ids and step['id'] in strafe_ids:
-            modes.append('strafe')
-        else:
-            modes.append('move_base')
+        modes.append('strafe' if is_strafe_leg(prev, step, strafe_ids) else 'move_base')
         prev = step
     return modes
 
@@ -262,8 +267,7 @@ def run(plan, dwell, timeout, retries, strict, no_tasks, map_frame,
     for idx, step in enumerate(plan):
         if rospy.is_shutdown():
             break
-        via_strafe = (strafe is not None and prev is not None
-                      and prev['id'] in strafe_ids and step['id'] in strafe_ids)
+        via_strafe = (strafe is not None and is_strafe_leg(prev, step, strafe_ids))
         rospy.loginfo('[%d/%d] %s %s（%s）', idx + 1, len(plan),
                       '平移前往' if via_strafe else '前往', step['id'], step['name'])
 
@@ -305,7 +309,7 @@ def run(plan, dwell, timeout, retries, strict, no_tasks, map_frame,
         # 下一段还是平移的话，先把车头转回行驶朝向再平移
         next_step = plan[idx + 1] if idx + 1 < len(plan) else None
         next_is_strafe = (strafe is not None and next_step is not None
-                          and step['id'] in strafe_ids and next_step['id'] in strafe_ids
+                          and is_strafe_leg(step, next_step, strafe_ids)
                           and not no_tasks)
         if next_is_strafe and angle_diff(last_yaw, step['yaw']) > 0.05:
             rospy.loginfo('   转回行驶朝向 %.0f° 再继续平移', math.degrees(step['yaw']))
