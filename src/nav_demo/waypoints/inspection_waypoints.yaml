@@ -91,7 +91,7 @@ points:
     yaw_deg: 180
 - id: 8
   name: B 街区东方识别点位
-  x: 1.83
+  x: 1.81
   y: 1.827
   yaw: 1.4113
   yaw_deg: 80.9
@@ -108,7 +108,7 @@ points:
     yaw_deg: 90
 - id: 9
   name: 中下方拐角点位
-  x: 2.024
+  x: 1.81
   y: 3.46
   yaw: 1.444
   yaw_deg: 82.7
