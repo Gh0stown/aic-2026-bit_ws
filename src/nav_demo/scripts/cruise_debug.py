@@ -284,12 +284,14 @@ class CruiseWorker(threading.Thread):
 
         timeout = distance / self.strafe_speed * 2.0 + 3.0
         started = time.monotonic()
+        paused = 0.0
         completed = 0.0
         current = 0.0
         rate = rospy.Rate(20)
         try:
             while not self._stop.is_set():
                 if not self._resume.is_set():
+                    t_pause = time.monotonic()
                     self._stop_motion()
                     cur = self._fresh_odom()
                     if cur is not None:
@@ -297,6 +299,7 @@ class CruiseWorker(threading.Thread):
                     self.log('    暂停：平移停车（已完成 %.2fm）' % completed)
                     if not self._wait_if_paused():
                         return False
+                    paused += time.monotonic() - t_pause
                     start = self._fresh_odom()
                     if start is None:
                         self.log('    /odom 中断')
@@ -309,7 +312,7 @@ class CruiseWorker(threading.Thread):
                 moved = completed + self._delta_y(start, cur) * sign
                 if moved >= distance - 0.005:
                     return True
-                if time.monotonic() - started > timeout:
+                if time.monotonic() - started - paused > timeout:
                     self.log('    平移超时')
                     return False
                 current = min(self.strafe_speed, current + 0.02)
@@ -355,13 +358,16 @@ class CruiseWorker(threading.Thread):
             return False
         timeout = 8.0 + abs(self._norm_angle(target - pose[2])) / 0.2
         started = time.monotonic()
+        paused = 0.0
         rate = rospy.Rate(20)
         try:
             while not self._stop.is_set():
                 if not self._resume.is_set():
+                    t_pause = time.monotonic()
                     self._stop_motion()
                     if not self._wait_if_paused():
                         return False
+                    paused += time.monotonic() - t_pause
                     continue
                 pose = self._map_pose()
                 if pose is None:
@@ -370,7 +376,7 @@ class CruiseWorker(threading.Thread):
                 err = self._norm_angle(target - pose[2])
                 if abs(err) <= 0.03:
                     return True
-                if time.monotonic() - started > timeout:
+                if time.monotonic() - started - paused > timeout:
                     self.log('    转向超时（目标 %.0f°）' % math.degrees(target))
                     return False
                 # 比例控制，接近目标自动减速，避免一侧轮子突然发力
