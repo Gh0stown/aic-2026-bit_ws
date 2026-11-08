@@ -89,7 +89,7 @@ class PoseTracker(object):
 
 class CruiseWorker(threading.Thread):
     def __init__(self, plan, dwell, strafe_ids, strafe_speed, map_frame,
-                 log_fn, on_status):
+                 log_fn, on_status, pose_get=None):
         super(CruiseWorker, self).__init__(daemon=True)
         self.plan = plan
         self.dwell = dwell
@@ -98,6 +98,7 @@ class CruiseWorker(threading.Thread):
         self.map_frame = map_frame
         self.log_fn = log_fn
         self.on_status = on_status
+        self._pose_get = pose_get
 
         self._resume = threading.Event()
         self._resume.set()
@@ -173,10 +174,20 @@ class CruiseWorker(threading.Thread):
         except Exception:  # noqa: BLE001
             pass
 
+    def _pose_far(self, x, y, tol=0.6):
+        """move_base 报成功时，用 TF 位姿再核对一次到点距离。"""
+        if self._pose_get is None:
+            return False
+        pose = self._pose_get()
+        if pose is None:
+            return False
+        return math.hypot(pose[0] - x, pose[1] - y) > tol
+
     def _send_goal(self, x, y, yaw, label):
+        import actionlib
         import rospy
         from actionlib_msgs.msg import GoalStatus
-        from move_base_msgs.msg import MoveBaseGoal
+        from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
         from tf.transformations import quaternion_from_euler
 
         goal = MoveBaseGoal()
@@ -190,30 +201,51 @@ class CruiseWorker(threading.Thread):
         goal.target_pose.pose.orientation.z = q[2]
         goal.target_pose.pose.orientation.w = q[3]
 
+        far_count = 0
         while not self._stop.is_set():
             if not self._resume.is_set():
                 self.log('    （暂停中，等待继续）')
                 if not self._wait_if_paused():
                     return False
                 continue
+            # 每个目标用新的 action client，避免暂停/取消后拿到上一次目标的残留状态
+            client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
+            if not client.wait_for_server(rospy.Duration(2.0)):
+                self.log('    等待 move_base 超时')
+                return False
             self.log('  -> %s (%.3f, %.3f, %.0f°)'
                      % (label, x, y, math.degrees(yaw)))
-            self._client.send_goal(goal)
-            while not self._stop.is_set():
+            client.send_goal(goal)
+
+            action = None
+            while not self._stop.is_set() and action is None:
                 if not self._resume.is_set():
-                    self.log('    暂停：取消当前目标，停车')
-                    self._client.cancel_goal()
+                    client.cancel_goal()
                     self._stop_motion()
+                    t0 = time.monotonic()
+                    while (client.get_state() in (GoalStatus.PENDING, GoalStatus.ACTIVE)
+                           and time.monotonic() - t0 < 2.0):
+                        time.sleep(0.05)
+                    self.log('    暂停：目标已取消，停车')
                     if not self._wait_if_paused():
                         return False
-                    break
-                if self._client.wait_for_result(rospy.Duration(0.1)):
-                    if self._client.get_state() == GoalStatus.SUCCEEDED:
+                    action = 'pause'
+                elif client.wait_for_result(rospy.Duration(0.1)):
+                    state = client.get_state()
+                    if state != GoalStatus.SUCCEEDED:
+                        self.log('    未成功（state=%s）' % state)
+                        return False
+                    if self._pose_far(x, y):
+                        far_count += 1
+                        self.log('    目标报成功但离点位较远（第 %d 次），重发' % far_count)
+                        if far_count >= 2:
+                            return False
+                        action = 'retry'
+                    else:
                         return True
-                    self.log('    未成功（state=%s）' % self._client.get_state())
-                    return False
-            else:
+            if self._stop.is_set():
                 return False
+            # 'pause' 或 'retry' 都回到外层重新发
         return False
 
     @staticmethod
@@ -649,7 +681,8 @@ class App(object):
         self.log_file.write('\n===== 开始巡航 %s =====\n'
                             % datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         self.worker = CruiseWorker(self.plan, dwell, self._strafe_ids(), speed,
-                                   self.args.map_frame, self._log, lambda: None)
+                                   self.args.map_frame, self._log, lambda: None,
+                                   pose_get=self.pose_tracker.get)
         self.worker.start()
         self.start_btn.configure(state='disabled')
         self.pause_btn.configure(state='normal')
