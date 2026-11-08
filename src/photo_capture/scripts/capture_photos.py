@@ -354,6 +354,12 @@ class Camera:
             )
 
         try:
+            # 1080p/720p 在 USB2 UVC 上通常只有 MJPG 能跑 30fps；
+            # YUYV 1920x1080 往往只有 5fps，既卡又容易糊。
+            if isinstance(self.source, int) and (
+                    self.width >= 1280 or self.height >= 720):
+                cap.set(cv2.CAP_PROP_FOURCC,
+                        cv2.VideoWriter_fourcc(*"MJPG"))
             if self.width > 0:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             if self.height > 0:
@@ -4142,8 +4148,10 @@ def parse_args(argv=None):
     parser.add_argument("--infer-device", choices=("auto", "cpu", "cuda"),
                         default="auto",
                         help="推理设备（默认 auto：有 CUDA 用 GPU，否则 CPU）")
-    parser.add_argument("--width", type=int, default=0, help="采集宽度，0 表示用摄像头默认值")
-    parser.add_argument("--height", type=int, default=0, help="采集高度，0 表示用摄像头默认值")
+    parser.add_argument("--width", type=int, default=1920,
+                        help="采集宽度（默认 1920；0 表示用摄像头默认值）")
+    parser.add_argument("--height", type=int, default=1080,
+                        help="采集高度（默认 1080；0 表示用摄像头默认值）")
     parser.add_argument("--fps", type=float, default=0, help="采集帧率，0 表示用摄像头默认值")
     parser.add_argument("--format", choices=("jpg", "png"), default="jpg",
                         help="图片格式（默认 jpg）")
