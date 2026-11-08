@@ -919,6 +919,10 @@ class App(object):
                 self.tree.selection_set(str(idx))
                 self.tree.see(str(idx))
         self._draw_pose()
+        if self.run_start is not None:
+            elapsed = time.monotonic() - self.run_start
+            self.root.title('巡航调试  用时 %02d:%02d'
+                            % (int(elapsed) // 60, int(elapsed) % 60))
         # 一次巡航结束后重新放开“开始”，不用重启 GUI
         if self.worker is not None and not self.worker.is_alive():
             if str(self.start_btn['state']) == 'disabled':
@@ -941,7 +945,9 @@ class App(object):
         self.current_id = None
         self._draw_highlight()
         dwell = float(self.dwell_var.get())
-        speed = float(self.speed_var.get())
+        speed = max(0.02, min(0.10, float(self.speed_var.get())))
+        self.speed_var.set('%.2f' % speed)
+        self.run_start = time.monotonic()
         self.log_file.write('\n===== 开始巡航 %s =====\n'
                             % datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         self.worker = CruiseWorker(self.plan, dwell, self._strafe_ids(), speed,
