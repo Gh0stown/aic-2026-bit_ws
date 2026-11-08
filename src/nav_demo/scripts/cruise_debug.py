@@ -103,7 +103,7 @@ class CruiseWorker(threading.Thread):
 
         self._resume = threading.Event()
         self._resume.set()
-        self._stop = threading.Event()
+        self._stop_evt = threading.Event()
         self._lock = threading.Lock()
         self._odom = None
         self._odom_lock = threading.Lock()
@@ -128,7 +128,7 @@ class CruiseWorker(threading.Thread):
         self.log('== 继续 ==')
 
     def stop(self):
-        self._stop.set()
+        self._stop_evt.set()
         self._resume.set()
         self._cancel_all()
         self._stop_motion()
@@ -155,9 +155,9 @@ class CruiseWorker(threading.Thread):
 
     # ---------- 运动 ----------
     def _wait_if_paused(self):
-        while not self._stop.is_set() and not self._resume.wait(0.05):
+        while not self._stop_evt.is_set() and not self._resume.wait(0.05):
             pass
-        return not self._stop.is_set()
+        return not self._stop_evt.is_set()
 
     def _cancel_all(self):
         for client in (self._client, self._active_client):
@@ -206,7 +206,7 @@ class CruiseWorker(threading.Thread):
         goal.target_pose.pose.orientation.w = q[3]
 
         far_count = 0
-        while not self._stop.is_set():
+        while not self._stop_evt.is_set():
             if not self._resume.is_set():
                 self.log('    （暂停中，等待继续）')
                 if not self._wait_if_paused():
@@ -224,7 +224,7 @@ class CruiseWorker(threading.Thread):
 
             action = None
             try:
-                while not self._stop.is_set() and action is None:
+                while not self._stop_evt.is_set() and action is None:
                     if not self._resume.is_set():
                         client.cancel_goal()
                         self._stop_motion()
@@ -251,7 +251,7 @@ class CruiseWorker(threading.Thread):
                             return True
             finally:
                 self._active_client = None
-            if self._stop.is_set():
+            if self._stop_evt.is_set():
                 client.cancel_goal()
                 self._stop_motion()
                 return False
@@ -289,7 +289,7 @@ class CruiseWorker(threading.Thread):
         current = 0.0
         rate = rospy.Rate(20)
         try:
-            while not self._stop.is_set():
+            while not self._stop_evt.is_set():
                 if not self._resume.is_set():
                     t_pause = time.monotonic()
                     self._stop_motion()
@@ -361,7 +361,7 @@ class CruiseWorker(threading.Thread):
         paused = 0.0
         rate = rospy.Rate(20)
         try:
-            while not self._stop.is_set():
+            while not self._stop_evt.is_set():
                 if not self._resume.is_set():
                     t_pause = time.monotonic()
                     self._stop_motion()
@@ -391,7 +391,7 @@ class CruiseWorker(threading.Thread):
 
     def _dwell(self, seconds):
         end = time.monotonic() + seconds
-        while not self._stop.is_set():
+        while not self._stop_evt.is_set():
             if not self._resume.is_set():
                 paused_at = time.monotonic()
                 if not self._wait_if_paused():
@@ -426,7 +426,7 @@ class CruiseWorker(threading.Thread):
             self.log('等待 map -> %s 的 TF ...' % self.base_frame)
             t0 = time.monotonic()
             while (self._map_pose() is None and time.monotonic() - t0 < 5.0
-                   and not self._stop.is_set()):
+                   and not self._stop_evt.is_set()):
                 time.sleep(0.1)
             if self._map_pose() is None:
                 self._set_status('没有 map->base TF')
@@ -438,7 +438,7 @@ class CruiseWorker(threading.Thread):
         prev = None
         try:
             for idx, step in enumerate(self.plan):
-                if self._stop.is_set():
+                if self._stop_evt.is_set():
                     break
                 via_strafe = (prev is not None and prev['id'] in self.strafe_ids
                               and step['id'] in self.strafe_ids)
@@ -455,7 +455,7 @@ class CruiseWorker(threading.Thread):
 
                 if via_strafe:
                     self._rotate_to(step['yaw'], '平移前朝向')
-                    if self._stop.is_set():
+                    if self._stop_evt.is_set():
                         break
                     lateral = lateral_delta(prev, step)
                     direction = 'left' if lateral > 0 else 'right'
@@ -469,7 +469,7 @@ class CruiseWorker(threading.Thread):
                         self.log('  没有位姿，按记录朝向行驶')
                     self.log('  预转向到方位 %.0f°' % math.degrees(bearing))
                     self._rotate_to(bearing, '对准 %s' % step['id'])
-                    if self._stop.is_set():
+                    if self._stop_evt.is_set():
                         break
                     arrived = self._send_goal(step['x'], step['y'], bearing,
                                               '点位 %s' % step['id'])
@@ -477,11 +477,11 @@ class CruiseWorker(threading.Thread):
                         if abs(self._norm_angle(step['yaw'] - bearing)) > 0.05:
                             self.log('  到点转到 %.0f°' % math.degrees(step['yaw']))
                             self._rotate_to(step['yaw'], '到达朝向')
-                            if self._stop.is_set():
+                            if self._stop_evt.is_set():
                                 break
 
                 if not arrived:
-                    if self._stop.is_set():
+                    if self._stop_evt.is_set():
                         break
                     self.log('  到达 %s 失败' % step['id'])
                     prev = step
@@ -489,13 +489,13 @@ class CruiseWorker(threading.Thread):
 
                 last_yaw = step['yaw']
                 for name, yaw in step['tasks']:
-                    if self._stop.is_set():
+                    if self._stop_evt.is_set():
                         break
                     self.log('  识别：%s，转向 %.0f°' % (name, math.degrees(yaw)))
                     if self._rotate_to(yaw, name):
                         last_yaw = yaw
                         self._dwell(self.dwell)
-                    elif not self._stop.is_set():
+                    elif not self._stop_evt.is_set():
                         self.log('  转向 %s 失败' % name)
 
                 if next_is_strafe and angle_diff(last_yaw, step['yaw']) > 0.05:
@@ -504,7 +504,7 @@ class CruiseWorker(threading.Thread):
                     self._rotate_to(step['yaw'], '恢复朝向')
 
                 prev = step
-            if self._stop.is_set():
+            if self._stop_evt.is_set():
                 self._cancel_all()
                 self._stop_motion()
                 self._set_status('已终止')
