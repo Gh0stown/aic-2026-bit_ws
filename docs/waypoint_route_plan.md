@@ -85,3 +85,17 @@ rosrun nav_demo cruise_waypoints.py --route fast --dwell 3
 - 平移相关参数：`--strafe-ids 14,15,16,17,18`、`--strafe-speed 0.06`、`--no-strafe`
 - 退出（Ctrl-C）会取消 move_base 目标，避免脚本停了车还在跑
 - 配套：`newt.py` 以 20Hz 重发最后速度、0.5s 无指令自动归零、退出发零速
+
+## 图形化巡航（cruise_debug.py，推荐）
+
+```bash
+rosrun nav_demo cruise_debug.py --route fast
+```
+
+- 顶部选路线（left/right/fast）或填点位顺序，点“载入计划”；
+- 左侧地图显示点位、路线、当前目标（橙圈）和实时位姿（红箭头）；
+- 右侧是执行列表和日志；
+- 底部：开始 / 暂停 / 继续 / 终止 / 记录现场；
+- 暂停会取消 move_base 目标、停止平移并持续发零速度；继续从当前步骤重新开始，不跳点；
+- 记录现场写入 `nav_demo/waypoints/cruise_debug_YYYYmmdd_HHMMSS.log`；
+- 依赖 nav777（move_base / AMCL / TF）和 `newt.py`。

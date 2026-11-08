@@ -14,3 +14,6 @@ src/mycobot_ros/
 # Python 缓存
 *.pyc
 __pycache__/
+
+# 巡航调试日志
+src/nav_demo/waypoints/cruise_debug_*.log
