@@ -680,6 +680,7 @@ class App(object):
         self.log_queue = queue.Queue()
         self.pose_tracker = None
         self.current_id = None
+        self.run_start = None
 
         self.log_path = os.path.join(
             os.path.dirname(DEFAULT_POINTS),
