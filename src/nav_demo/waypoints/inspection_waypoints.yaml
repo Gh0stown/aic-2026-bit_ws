@@ -217,7 +217,7 @@ points:
   name: 结束点位
   x: 0.013
   y: -0.002
-  yaw: -3.0687
-  yaw_deg: -175.8
+  yaw: 0.0
+  yaw_deg: 0.0
   stamp: '2026-11-07 12:20:45'
   tasks: []

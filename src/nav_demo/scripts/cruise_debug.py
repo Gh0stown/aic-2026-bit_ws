@@ -471,8 +471,8 @@ class CruiseWorker(threading.Thread):
         finally:
             self._stop_motion()
 
-    def _align_to(self, x, y, tol=0.02, speed=0.06, timeout=6.0):
-        """用麦轮 linear.x/y 闭环补最后几厘米，不改变车头。"""
+    def _align_to(self, x, y, tol=0.02, speed=0.06, timeout=6.0, hold_yaw=None):
+        """用麦轮 linear.x/y 闭环走到目标，可同时保持车头（倒车入库用）。"""
         import rospy
         from geometry_msgs.msg import Twist
 
@@ -502,6 +502,9 @@ class CruiseWorker(threading.Thread):
                 twist = Twist()
                 twist.linear.x = max(-speed, min(speed, 1.5 * vx))
                 twist.linear.y = max(-speed, min(speed, 1.5 * vy))
+                if hold_yaw is not None:
+                    err_yaw = self._norm_angle(hold_yaw - pose[2])
+                    twist.angular.z = max(-0.2, min(0.2, 1.0 * err_yaw))
                 self._pub.publish(twist)
                 rate.sleep()
             return False
@@ -570,7 +573,15 @@ class CruiseWorker(threading.Thread):
                 self.log('[%d/%d] %s %s' % (idx + 1, len(self.plan),
                                             step['id'], step['name']))
 
-                if via_strafe:
+                final_park = (idx == len(self.plan) - 1 and step['id'] == 19)
+                if final_park:
+                    self.log('  倒车入库：先转到 0°（朝红绿灯），再倒进 19')
+                    self._rotate_to(0.0, '倒车入库朝向')
+                    if self._stop.is_set():
+                        break
+                    arrived = self._align_to(step['x'], step['y'], tol=0.02,
+                                             speed=0.08, timeout=20.0, hold_yaw=0.0)
+                elif via_strafe:
                     self._rotate_to(step['yaw'], '平移前朝向')
                     if self._stop_evt.is_set():
                         break
@@ -620,7 +631,7 @@ class CruiseWorker(threading.Thread):
                              % math.degrees(step['yaw']))
                     self._rotate_to(step['yaw'], '恢复朝向')
 
-                if idx == len(self.plan) - 1:
+                if idx == len(self.plan) - 1 and not final_park:
                     self.log('  最终对准 %s (%.3f, %.3f)' % (step['id'], step['x'], step['y']))
                     self._align_to(step['x'], step['y'])
 
@@ -817,7 +828,10 @@ class App(object):
         self.tree.delete(*self.tree.get_children())
         prev = None
         for idx, step in enumerate(self.plan):
-            mode = '平移' if is_strafe_leg(prev, step, self._strafe_ids()) else 'move_base'
+            if idx == len(self.plan) - 1 and step['id'] == 19:
+                mode = '倒车入库'
+            else:
+                mode = '平移' if is_strafe_leg(prev, step, self._strafe_ids()) else 'move_base'
             tasks = ' → '.join('%s %.0f°' % (n, math.degrees(y)) for n, y in step['tasks']) \
                 or '—'
             self.tree.insert('', 'end', iid=str(idx),
