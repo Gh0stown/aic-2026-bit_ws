@@ -449,22 +449,59 @@ class CruiseWorker(threading.Thread):
                     self.log('    转向中位姿丢失')
                     return False
                 err = self._norm_angle(target - pose[2])
-                if abs(err) <= 0.03:
+                if abs(err) <= 0.05:
                     return True
-                if abs(err) < best_err - 0.01:
+                if abs(err) < best_err - 0.02:
                     best_err = abs(err)
                     last_progress = time.monotonic()
-                elif time.monotonic() - last_progress > 1.0:
-                    self.log('    旋转受阻（误差 %.1f°，1 秒没有改善）'
+                elif abs(err) > 0.15 and time.monotonic() - last_progress > 2.0:
+                    self.log('    旋转受阻（误差 %.1f°，2 秒没有改善）'
                              % math.degrees(abs(err)))
                     return False
                 if time.monotonic() - started - paused > timeout:
                     self.log('    转向超时（目标 %.0f°）' % math.degrees(target))
                     return False
                 # 比例控制，接近目标自动减速，避免一侧轮子突然发力
-                cmd = min(0.4, max(0.12, 1.5 * abs(err)))
+                cmd = min(0.4, max(0.20, 1.5 * abs(err)))
                 twist = Twist()
                 twist.angular.z = (1.0 if err > 0 else -1.0) * cmd
+                self._pub.publish(twist)
+                rate.sleep()
+            return False
+        finally:
+            self._stop_motion()
+
+    def _align_to(self, x, y, tol=0.02, speed=0.06, timeout=6.0):
+        """用麦轮 linear.x/y 闭环补最后几厘米，不改变车头。"""
+        import rospy
+        from geometry_msgs.msg import Twist
+
+        started = time.monotonic()
+        rate = rospy.Rate(20)
+        try:
+            while not self._stop.is_set():
+                if not self._resume.is_set():
+                    self._stop_motion()
+                    if not self._wait_if_paused():
+                        return False
+                    continue
+                pose = self._map_pose()
+                if pose is None:
+                    return False
+                ex = x - pose[0]
+                ey = y - pose[1]
+                dist = math.hypot(ex, ey)
+                if dist <= tol:
+                    return True
+                if time.monotonic() - started > timeout:
+                    self.log('    最终对准超时（剩余 %.2f m）' % dist)
+                    return False
+                yaw = pose[2]
+                vx = math.cos(yaw) * ex + math.sin(yaw) * ey
+                vy = -math.sin(yaw) * ex + math.cos(yaw) * ey
+                twist = Twist()
+                twist.linear.x = max(-speed, min(speed, 1.5 * vx))
+                twist.linear.y = max(-speed, min(speed, 1.5 * vy))
                 self._pub.publish(twist)
                 rate.sleep()
             return False
@@ -516,6 +553,7 @@ class CruiseWorker(threading.Thread):
                          % self.base_frame)
                 return
 
+        started_run = time.monotonic()
         self._set_status('运行中')
         prev = None
         try:
@@ -581,6 +619,10 @@ class CruiseWorker(threading.Thread):
                     self.log('  转回行驶朝向 %.0f° 再继续平移'
                              % math.degrees(step['yaw']))
                     self._rotate_to(step['yaw'], '恢复朝向')
+
+                if idx == len(self.plan) - 1:
+                    self.log('  最终对准 %s (%.3f, %.3f)' % (step['id'], step['x'], step['y']))
+                    self._align_to(step['x'], step['y'])
 
                 prev = step
             if self._stop_evt.is_set():
@@ -689,6 +731,9 @@ class App(object):
         ttk.Spinbox(top, from_=0.02, to=0.10, increment=0.01, width=5,
                     textvariable=self.speed_var).pack(side='left', padx=(4, 12))
 
+        self.skip0_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text='跳过0号点', variable=self.skip0_var,
+                        command=self._reload_plan).pack(side='left', padx=(0, 10))
         ttk.Button(top, text='载入计划', command=self._reload_plan).pack(side='left')
 
         body = ttk.Frame(self.root, padding=6)
@@ -745,13 +790,19 @@ class App(object):
         text = self.order_var.get().strip()
         if text:
             try:
-                return [int(x) for x in text.replace(' ', '').split(',') if x != '']
+                order = [int(x) for x in text.replace(' ', '').split(',') if x != '']
             except ValueError:
                 self._log('顺序格式不对：%s' % text)
                 return []
+            if self.skip0_var.get() and order and order[0] == 0:
+                order = order[1:]
+            return order
         route = self.route_var.get()
         if route in self.routes:
-            return [int(x) for x in self.routes[route]]
+            order = [int(x) for x in self.routes[route]]
+            if self.skip0_var.get() and order and order[0] == 0:
+                order = order[1:]
+            return order
         return []
 
     def _reload_plan(self):
