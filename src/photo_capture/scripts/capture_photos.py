@@ -47,6 +47,7 @@ import json
 import os
 import queue
 import re
+import struct
 import subprocess
 import sys
 import threading
@@ -332,14 +333,20 @@ def has_display() -> bool:
 
 class Camera:
     def __init__(self, source: Union[int, str], width: int = 0, height: int = 0,
-                 fps: float = 0.0, mirror: bool = False):
+                 fps: float = 0.0, mirror: bool = False, sharpness: int = 3,
+                 pixel_format: str = "auto"):
         self.source = source
         self.width = int(width or 0)
         self.height = int(height or 0)
         self.fps = float(fps or 0.0)
         self.mirror = bool(mirror)
+        self.sharpness = int(sharpness)
+        self.pixel_format = str(pixel_format).lower()
+        self._original_sharpness = None
         self.cap = None
         self.frame_size = (0, 0)
+        self.actual_fourcc = None
+        self.actual_fps = None
 
     def open(self) -> None:
         """打开摄像头并确认能读到画面，失败时抛 CameraError。"""
@@ -356,16 +363,29 @@ class Camera:
         try:
             # 1080p/720p 在 USB2 UVC 上通常只有 MJPG 能跑 30fps；
             # YUYV 1920x1080 往往只有 5fps，既卡又容易糊。
-            if isinstance(self.source, int) and (
-                    self.width >= 1280 or self.height >= 720):
-                cap.set(cv2.CAP_PROP_FOURCC,
-                        cv2.VideoWriter_fourcc(*"MJPG"))
+            # 也允许强制 YUYV，对比不同电脑上的取流差异。
+            if isinstance(self.source, int):
+                if self.pixel_format == "mjpg":
+                    cap.set(cv2.CAP_PROP_FOURCC,
+                            cv2.VideoWriter_fourcc(*"MJPG"))
+                elif self.pixel_format == "yuyv":
+                    cap.set(cv2.CAP_PROP_FOURCC,
+                            cv2.VideoWriter_fourcc(*"YUYV"))
+                elif self.width >= 1280 or self.height >= 720:
+                    cap.set(cv2.CAP_PROP_FOURCC,
+                            cv2.VideoWriter_fourcc(*"MJPG"))
             if self.width > 0:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             if self.height > 0:
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
             if self.fps > 0:
                 cap.set(cv2.CAP_PROP_FPS, self.fps)
+            if self.sharpness >= 0 and isinstance(self.source, int):
+                try:
+                    self._original_sharpness = cap.get(cv2.CAP_PROP_SHARPNESS)
+                    cap.set(cv2.CAP_PROP_SHARPNESS, self.sharpness)
+                except Exception:
+                    self._original_sharpness = None
             try:
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except cv2.error:
@@ -387,6 +407,8 @@ class Camera:
 
         self.cap = cap
         self.frame_size = (int(frame.shape[1]), int(frame.shape[0]))
+        self.actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+        self.actual_fps = cap.get(cv2.CAP_PROP_FPS)
 
     def read(self):
         if self.cap is None:
@@ -400,6 +422,13 @@ class Camera:
 
     def release(self) -> None:
         if self.cap is not None:
+            if self._original_sharpness is not None:
+                try:
+                    self.cap.set(cv2.CAP_PROP_SHARPNESS,
+                                 self._original_sharpness)
+                except Exception:
+                    pass
+                self._original_sharpness = None
             try:
                 self.cap.release()
             except Exception:
@@ -3149,6 +3178,7 @@ def run_gui_detect(args, output_root: Path, root) -> int:
     camera = Camera(
         parse_camera_source(args.device),
         width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+        sharpness=args.sharpness, pixel_format=args.pixel_format,
     )
     try:
         camera.open()
@@ -3214,6 +3244,7 @@ def run_gui_scan(args, output_root: Path, root) -> int:
     camera = Camera(
         parse_camera_source(args.device),
         width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+        sharpness=args.sharpness, pixel_format=args.pixel_format,
     )
     try:
         camera.open()
@@ -3354,6 +3385,7 @@ def run_gui_gauge(args, output_root: Path, root) -> int:
     camera = Camera(
         parse_camera_source(args.device),
         width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+        sharpness=args.sharpness, pixel_format=args.pixel_format,
     )
     try:
         camera.open()
@@ -3415,6 +3447,7 @@ def run_gui_photo(args, output_root: Path, root) -> int:
     camera = Camera(
         parse_camera_source(args.device),
         width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+        sharpness=args.sharpness, pixel_format=args.pixel_format,
     )
     try:
         camera.open()
@@ -3520,6 +3553,14 @@ def shoot_cli(camera: Camera, session: Session) -> int:
     return saved
 
 
+def _fourcc_text(value) -> str:
+    try:
+        text = struct.pack("<I", int(value)).decode("ascii", errors="replace")
+        return "".join(ch for ch in text if ch.isprintable()).strip() or "?"
+    except Exception:
+        return "?"
+
+
 def print_summary(session: Session, camera: Camera) -> None:
     width, height = camera.frame_size
     print("[photo_capture] 类型：{}".format(session.type_name))
@@ -3527,7 +3568,9 @@ def print_summary(session: Session, camera: Camera) -> None:
         session.count, session.interval))
     print("[photo_capture] 保存目录：{}".format(session.type_dir))
     if width and height:
-        print("[photo_capture] 摄像头画面：{}x{}".format(width, height))
+        print("[photo_capture] 摄像头画面：{}x{}，格式 {}，{} fps，锐度 {}".format(
+            width, height, _fourcc_text(camera.actual_fourcc),
+            int(camera.actual_fps or 0), camera.sharpness))
 
 
 def print_cli_help() -> None:
@@ -3597,6 +3640,7 @@ def run_detect_cli(args, output_root: Path) -> int:
     camera = Camera(
         parse_camera_source(args.device),
         width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+        sharpness=args.sharpness, pixel_format=args.pixel_format,
     )
     try:
         camera.open()
@@ -3700,6 +3744,7 @@ def run_scan_cli(args, output_root: Path) -> int:
     camera = Camera(
         parse_camera_source(args.device),
         width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+        sharpness=args.sharpness, pixel_format=args.pixel_format,
     )
     try:
         camera.open()
@@ -3923,6 +3968,7 @@ def run_gauge_cli(args, output_root: Path) -> int:
     camera = Camera(
         parse_camera_source(args.device),
         width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+        sharpness=args.sharpness, pixel_format=args.pixel_format,
     )
     try:
         camera.open()
@@ -4049,6 +4095,7 @@ def run_cli(args, output_root: Path) -> int:
     camera = Camera(
         parse_camera_source(args.device),
         width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+        sharpness=args.sharpness, pixel_format=args.pixel_format,
     )
     try:
         camera.open()
@@ -4148,11 +4195,16 @@ def parse_args(argv=None):
     parser.add_argument("--infer-device", choices=("auto", "cpu", "cuda"),
                         default="auto",
                         help="推理设备（默认 auto：有 CUDA 用 GPU，否则 CPU）")
-    parser.add_argument("--width", type=int, default=1920,
-                        help="采集宽度（默认 1920；0 表示用摄像头默认值）")
-    parser.add_argument("--height", type=int, default=1080,
-                        help="采集高度（默认 1080；0 表示用摄像头默认值）")
+    parser.add_argument("--width", type=int, default=1280,
+                        help="采集宽度（默认 1280；0 表示用摄像头默认值）")
+    parser.add_argument("--height", type=int, default=720,
+                        help="采集高度（默认 720；0 表示用摄像头默认值）")
     parser.add_argument("--fps", type=float, default=0, help="采集帧率，0 表示用摄像头默认值")
+    parser.add_argument("--sharpness", type=int, default=3,
+                        help="摄像头锐度 0-6（默认 3；6 更硬但噪点更明显；-1 保持原值）")
+    parser.add_argument("--pixel-format", choices=("auto", "mjpg", "yuyv"),
+                        default="auto",
+                        help="取流格式：auto 默认高分辨率用 MJPG；yuyv 未压缩但帧率低")
     parser.add_argument("--format", choices=("jpg", "png"), default="jpg",
                         help="图片格式（默认 jpg）")
     parser.add_argument("--quality", type=int, default=95,
