@@ -390,6 +390,8 @@ class CruiseWorker(threading.Thread):
                 current = min(self.strafe_speed, current + 0.02)
                 twist = Twist()
                 twist.linear.y = sign * current
+                err_yaw = self._norm_angle(start[2] - cur[2])
+                twist.angular.z = max(-0.15, min(0.15, 1.2 * err_yaw))
                 self._pub.publish(twist)
                 rate.sleep()
         finally:
@@ -575,21 +577,32 @@ class CruiseWorker(threading.Thread):
 
                 final_park = (idx == len(self.plan) - 1 and step['id'] == 19)
                 if final_park:
+                    if prev is not None:
+                        self.log('  倒车前先对齐 %s (%.3f, %.3f)'
+                                 % (prev['id'], prev['x'], prev['y']))
+                        self._align_to(prev['x'], prev['y'], tol=0.03, speed=0.06,
+                                       timeout=10.0, hold_yaw=prev['yaw'])
+                        if self._stop.is_set():
+                            break
                     self.log('  倒车入库：先转到 0°（朝红绿灯），再倒进 19')
                     self._rotate_to(0.0, '倒车入库朝向')
                     if self._stop.is_set():
                         break
+                    self.log('  倒车到 19 (%.3f, %.3f)' % (step['x'], step['y']))
                     arrived = self._align_to(step['x'], step['y'], tol=0.02,
                                              speed=0.08, timeout=20.0, hold_yaw=0.0)
                 elif via_strafe:
                     self._rotate_to(step['yaw'], '平移前朝向')
                     if self._stop_evt.is_set():
                         break
-                    lateral = lateral_delta(prev, step)
-                    direction = 'left' if lateral > 0 else 'right'
-                    self.log('  平移 %.2f m %s（保持车头 %.0f°）'
-                             % (abs(lateral), direction, math.degrees(step['yaw'])))
-                    arrived = abs(lateral) < 0.01 or self._strafe(lateral, direction)
+                    dist = math.hypot(step['x'] - prev['x'], step['y'] - prev['y'])
+                    self.log('  闭环平移至 %s（%.2f m，保持车头 %.0f°）'
+                             % (step['id'], dist, math.degrees(step['yaw'])))
+                    arrived = self._align_to(
+                        step['x'], step['y'], tol=0.02,
+                        speed=self.strafe_speed,
+                        timeout=dist / self.strafe_speed * 2.0 + 5.0,
+                        hold_yaw=step['yaw'])
                 else:
                     bearing = self._bearing_to(step['x'], step['y'])
                     if bearing is None:
