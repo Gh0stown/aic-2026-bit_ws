@@ -481,7 +481,7 @@ class CruiseWorker(threading.Thread):
         started = time.monotonic()
         rate = rospy.Rate(20)
         try:
-            while not self._stop.is_set():
+            while not self._stop_evt.is_set():
                 if not self._resume.is_set():
                     self._stop_motion()
                     if not self._wait_if_paused():
@@ -582,11 +582,11 @@ class CruiseWorker(threading.Thread):
                                  % (prev['id'], prev['x'], prev['y']))
                         self._align_to(prev['x'], prev['y'], tol=0.03, speed=0.06,
                                        timeout=10.0, hold_yaw=prev['yaw'])
-                        if self._stop.is_set():
+                        if self._stop_evt.is_set():
                             break
                     self.log('  倒车入库：先转到 0°（朝红绿灯），再倒进 19')
                     self._rotate_to(0.0, '倒车入库朝向')
-                    if self._stop.is_set():
+                    if self._stop_evt.is_set():
                         break
                     self.log('  倒车到 19 (%.3f, %.3f)' % (step['x'], step['y']))
                     arrived = self._align_to(step['x'], step['y'], tol=0.02,
