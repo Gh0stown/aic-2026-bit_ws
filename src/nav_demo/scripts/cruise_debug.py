@@ -89,13 +89,14 @@ class PoseTracker(object):
 
 class CruiseWorker(threading.Thread):
     def __init__(self, plan, dwell, strafe_ids, strafe_speed, map_frame,
-                 log_fn, on_status, pose_get=None):
+                 log_fn, on_status, pose_get=None, base_frame='base_footprint'):
         super(CruiseWorker, self).__init__(daemon=True)
         self.plan = plan
         self.dwell = dwell
         self.strafe_ids = strafe_ids
         self.strafe_speed = max(0.02, min(0.10, float(strafe_speed)))
         self.map_frame = map_frame
+        self.base_frame = base_frame
         self.log_fn = log_fn
         self.on_status = on_status
         self._pose_get = pose_get
@@ -107,7 +108,9 @@ class CruiseWorker(threading.Thread):
         self._odom = None
         self._odom_lock = threading.Lock()
         self._client = None
+        self._active_client = None
         self._pub = None
+        self._tf_listener = None
         self._status = '待开始'
         self._step = ''
         self._current_id = None
@@ -157,11 +160,12 @@ class CruiseWorker(threading.Thread):
         return not self._stop.is_set()
 
     def _cancel_all(self):
-        if self._client is not None:
-            try:
-                self._client.cancel_all_goals()
-            except Exception:  # noqa: BLE001
-                pass
+        for client in (self._client, self._active_client):
+            if client is not None:
+                try:
+                    client.cancel_all_goals()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _stop_motion(self):
         if self._pub is None:
@@ -216,34 +220,40 @@ class CruiseWorker(threading.Thread):
             self.log('  -> %s (%.3f, %.3f, %.0f°)'
                      % (label, x, y, math.degrees(yaw)))
             client.send_goal(goal)
+            self._active_client = client
 
             action = None
-            while not self._stop.is_set() and action is None:
-                if not self._resume.is_set():
-                    client.cancel_goal()
-                    self._stop_motion()
-                    t0 = time.monotonic()
-                    while (client.get_state() in (GoalStatus.PENDING, GoalStatus.ACTIVE)
-                           and time.monotonic() - t0 < 2.0):
-                        time.sleep(0.05)
-                    self.log('    暂停：目标已取消，停车')
-                    if not self._wait_if_paused():
-                        return False
-                    action = 'pause'
-                elif client.wait_for_result(rospy.Duration(0.1)):
-                    state = client.get_state()
-                    if state != GoalStatus.SUCCEEDED:
-                        self.log('    未成功（state=%s）' % state)
-                        return False
-                    if self._pose_far(x, y):
-                        far_count += 1
-                        self.log('    目标报成功但离点位较远（第 %d 次），重发' % far_count)
-                        if far_count >= 2:
+            try:
+                while not self._stop.is_set() and action is None:
+                    if not self._resume.is_set():
+                        client.cancel_goal()
+                        self._stop_motion()
+                        t0 = time.monotonic()
+                        while (client.get_state() in (GoalStatus.PENDING, GoalStatus.ACTIVE)
+                               and time.monotonic() - t0 < 2.0):
+                            time.sleep(0.05)
+                        self.log('    暂停：目标已取消，停车')
+                        if not self._wait_if_paused():
                             return False
-                        action = 'retry'
-                    else:
-                        return True
+                        action = 'pause'
+                    elif client.wait_for_result(rospy.Duration(0.1)):
+                        state = client.get_state()
+                        if state != GoalStatus.SUCCEEDED:
+                            self.log('    未成功（state=%s）' % state)
+                            return False
+                        if self._pose_far(x, y):
+                            far_count += 1
+                            self.log('    目标报成功但离点位较远（第 %d 次），重发' % far_count)
+                            if far_count >= 2:
+                                return False
+                            action = 'retry'
+                        else:
+                            return True
+            finally:
+                self._active_client = None
             if self._stop.is_set():
+                client.cancel_goal()
+                self._stop_motion()
                 return False
             # 'pause' 或 'retry' 都回到外层重新发
         return False
@@ -311,6 +321,68 @@ class CruiseWorker(threading.Thread):
             self._stop_motion()
         return False
 
+    @staticmethod
+    def _norm_angle(a):
+        return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+    def _map_pose(self):
+        import rospy
+        import tf.transformations as tft
+        if self._tf_listener is None:
+            return None
+        try:
+            trans, rot = self._tf_listener.lookupTransform(
+                self.map_frame, self.base_frame, rospy.Time(0))
+        except Exception:  # noqa: BLE001
+            return None
+        return (trans[0], trans[1], tft.euler_from_quaternion(rot)[2])
+
+    def _bearing_to(self, x, y):
+        pose = self._map_pose()
+        if pose is None:
+            return None
+        return math.atan2(y - pose[1], x - pose[0])
+
+    def _rotate_to(self, target, label):
+        """只用 /cmd_vel 的 angular.z 闭环转到目标朝向（map 系）。"""
+        import rospy
+        from geometry_msgs.msg import Twist
+
+        target = self._norm_angle(target)
+        pose = self._map_pose()
+        if pose is None:
+            self.log('    没有 map->%s 位姿，无法转向 %s' % (self.base_frame, label))
+            return False
+        timeout = 8.0 + abs(self._norm_angle(target - pose[2])) / 0.2
+        started = time.monotonic()
+        rate = rospy.Rate(20)
+        try:
+            while not self._stop.is_set():
+                if not self._resume.is_set():
+                    self._stop_motion()
+                    if not self._wait_if_paused():
+                        return False
+                    continue
+                pose = self._map_pose()
+                if pose is None:
+                    self.log('    转向中位姿丢失')
+                    return False
+                err = self._norm_angle(target - pose[2])
+                if abs(err) <= 0.03:
+                    return True
+                if time.monotonic() - started > timeout:
+                    self.log('    转向超时（目标 %.0f°）' % math.degrees(target))
+                    return False
+                # 比例控制，接近目标自动减速，避免一侧轮子突然发力
+                cmd = min(0.4, max(0.05, 1.5 * abs(err)))
+                twist = Twist()
+                twist.angular.z = (1.0 if err > 0 else -1.0) * cmd
+                self._pub.publish(twist)
+                rate.sleep()
+            return False
+        finally:
+            self._stop_motion()
+
     def _dwell(self, seconds):
         end = time.monotonic() + seconds
         while not self._stop.is_set():
@@ -327,6 +399,7 @@ class CruiseWorker(threading.Thread):
     def run(self):
         import actionlib
         import rospy
+        import tf
         from geometry_msgs.msg import Twist
         from nav_msgs.msg import Odometry
         from move_base_msgs.msg import MoveBaseAction
@@ -334,6 +407,7 @@ class CruiseWorker(threading.Thread):
         self._client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
         self._pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
         rospy.Subscriber('/odom', Odometry, self._odom_cb, queue_size=1)
+        self._tf_listener = tf.TransformListener()
 
         self._set_status('等待 move_base')
         self.log('等待 move_base action server ...')
@@ -341,6 +415,18 @@ class CruiseWorker(threading.Thread):
             self._set_status('move_base 未启动')
             self.log('连不上 move_base，先启动 nav777')
             return
+
+        if self._map_pose() is None:
+            self.log('等待 map -> %s 的 TF ...' % self.base_frame)
+            t0 = time.monotonic()
+            while (self._map_pose() is None and time.monotonic() - t0 < 5.0
+                   and not self._stop.is_set()):
+                time.sleep(0.1)
+            if self._map_pose() is None:
+                self._set_status('没有 map->base TF')
+                self.log('没有 map -> %s 的 TF，转向无法闭环；先确认 AMCL/定位'
+                         % self.base_frame)
+                return
 
         self._set_status('运行中')
         prev = None
@@ -350,6 +436,10 @@ class CruiseWorker(threading.Thread):
                     break
                 via_strafe = (prev is not None and prev['id'] in self.strafe_ids
                               and step['id'] in self.strafe_ids)
+                next_step = self.plan[idx + 1] if idx + 1 < len(self.plan) else None
+                next_is_strafe = (next_step is not None
+                                  and step['id'] in self.strafe_ids
+                                  and next_step['id'] in self.strafe_ids)
                 self._set_step('[%d/%d] %s %s' % (idx + 1, len(self.plan),
                                                   step['id'], step['name']),
                                step['id'], idx)
@@ -358,14 +448,31 @@ class CruiseWorker(threading.Thread):
                                             step['id'], step['name']))
 
                 if via_strafe:
+                    self._rotate_to(step['yaw'], '平移前朝向')
+                    if self._stop.is_set():
+                        break
                     lateral = lateral_delta(prev, step)
                     direction = 'left' if lateral > 0 else 'right'
                     self.log('  平移 %.2f m %s（保持车头 %.0f°）'
                              % (abs(lateral), direction, math.degrees(step['yaw'])))
                     arrived = abs(lateral) < 0.01 or self._strafe(lateral, direction)
                 else:
-                    arrived = self._send_goal(step['x'], step['y'], step['yaw'],
+                    bearing = self._bearing_to(step['x'], step['y'])
+                    if bearing is None:
+                        bearing = step['yaw']
+                        self.log('  没有位姿，按记录朝向行驶')
+                    self.log('  预转向到方位 %.0f°' % math.degrees(bearing))
+                    self._rotate_to(bearing, '对准 %s' % step['id'])
+                    if self._stop.is_set():
+                        break
+                    arrived = self._send_goal(step['x'], step['y'], bearing,
                                               '点位 %s' % step['id'])
+                    if arrived and (step['tasks'] or next_is_strafe):
+                        if abs(self._norm_angle(step['yaw'] - bearing)) > 0.05:
+                            self.log('  到点转到 %.0f°' % math.degrees(step['yaw']))
+                            self._rotate_to(step['yaw'], '到达朝向')
+                            if self._stop.is_set():
+                                break
 
                 if not arrived:
                     if self._stop.is_set():
@@ -379,20 +486,16 @@ class CruiseWorker(threading.Thread):
                     if self._stop.is_set():
                         break
                     self.log('  识别：%s，转向 %.0f°' % (name, math.degrees(yaw)))
-                    if self._send_goal(step['x'], step['y'], yaw, name):
+                    if self._rotate_to(yaw, name):
                         last_yaw = yaw
                         self._dwell(self.dwell)
                     elif not self._stop.is_set():
                         self.log('  转向 %s 失败' % name)
 
-                next_step = self.plan[idx + 1] if idx + 1 < len(self.plan) else None
-                next_is_strafe = (next_step is not None
-                                  and step['id'] in self.strafe_ids
-                                  and next_step['id'] in self.strafe_ids)
                 if next_is_strafe and angle_diff(last_yaw, step['yaw']) > 0.05:
                     self.log('  转回行驶朝向 %.0f° 再继续平移'
                              % math.degrees(step['yaw']))
-                    self._send_goal(step['x'], step['y'], step['yaw'], '恢复朝向')
+                    self._rotate_to(step['yaw'], '恢复朝向')
 
                 prev = step
             if self._stop.is_set():
@@ -682,7 +785,8 @@ class App(object):
                             % datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         self.worker = CruiseWorker(self.plan, dwell, self._strafe_ids(), speed,
                                    self.args.map_frame, self._log, lambda: None,
-                                   pose_get=self.pose_tracker.get)
+                                   pose_get=self.pose_tracker.get,
+                                   base_frame=self.args.base_frame)
         self.worker.start()
         self.start_btn.configure(state='disabled')
         self.pause_btn.configure(state='normal')
