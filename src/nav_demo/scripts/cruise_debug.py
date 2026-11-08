@@ -87,6 +87,78 @@ class PoseTracker(object):
             return self.pose
 
 
+class ScanBuffer(object):
+    """缓存最新一帧 /scan。"""
+
+    def __init__(self):
+        import rospy
+        from sensor_msgs.msg import LaserScan
+        self._scan = None
+        self._stamp = 0.0
+        rospy.Subscriber('/scan', LaserScan, self._cb, queue_size=1)
+
+    def _cb(self, msg):
+        self._scan = msg
+        self._stamp = time.time()
+
+    def get(self, max_age=1.5):
+        if self._scan is None or time.time() - self._stamp > max_age:
+            return None
+        return self._scan
+
+
+def _score_grid(xs, ys, yaw, bx, by, dist, res, ox, oy, sigma):
+    import numpy as np
+    height, width = dist.shape
+    c, s = math.cos(yaw), math.sin(yaw)
+    dx = bx * c - by * s
+    dy = bx * s + by * c
+    score = np.zeros((len(ys), len(xs)), dtype=np.float32)
+    for k in range(len(dx)):
+        px = (xs[None, :] + dx[k] - ox) / res
+        py = height - (ys[:, None] + dy[k] - oy) / res
+        ix = np.clip(np.round(px).astype(np.int32), 0, width - 1)
+        iy = np.clip(np.round(py).astype(np.int32), 0, height - 1)
+        score += np.exp(-((dist[iy, ix] / sigma) ** 2))
+    return score
+
+
+def estimate_pose(base_points, dist, res, ox, oy, sigma=0.08):
+    """用一帧激光点（base 系）在地图距离场上做粗到细搜索，返回 (x, y, yaw, score)。"""
+    import numpy as np
+    bx = base_points[:, 0]
+    by = base_points[:, 1]
+    height, width = dist.shape
+
+    xs = np.arange(ox + 0.3, ox + width * res - 0.3, 0.1)
+    ys = np.arange(oy + 0.3, oy + height * res - 0.3, 0.1)
+    gx = np.clip(np.round((xs - ox) / res).astype(int), 0, width - 1)
+    gy = np.clip(np.round(height - (ys - oy) / res).astype(int), 0, height - 1)
+    free = dist[gy[:, None], gx[None, :]] > 0.15
+
+    best = None
+    for yaw in np.deg2rad(np.arange(0.0, 360.0, 10.0)):
+        score = _score_grid(xs, ys, yaw, bx, by, dist, res, ox, oy, sigma)
+        score[~free] = -1.0
+        idx = np.unravel_index(np.argmax(score), score.shape)
+        val = float(score[idx])
+        if best is None or val > best[3]:
+            best = (float(xs[idx[1]]), float(ys[idx[0]]), float(yaw), val)
+
+    x0, y0, yaw0, _ = best
+    xs = np.arange(x0 - 0.1, x0 + 0.101, 0.02)
+    ys = np.arange(y0 - 0.1, y0 + 0.101, 0.02)
+    best2 = best
+    yaw_center = math.degrees(yaw0)
+    for yaw in np.deg2rad(np.arange(yaw_center - 6.0, yaw_center + 6.1, 2.0)):
+        score = _score_grid(xs, ys, yaw, bx, by, dist, res, ox, oy, sigma)
+        idx = np.unravel_index(np.argmax(score), score.shape)
+        val = float(score[idx])
+        if val > best2[3]:
+            best2 = (float(xs[idx[1]]), float(ys[idx[0]]), float(yaw), val)
+    return best2
+
+
 class CruiseWorker(threading.Thread):
     def __init__(self, plan, dwell, strafe_ids, strafe_speed, map_frame,
                  log_fn, on_status, pose_get=None, base_frame='base_footprint'):
@@ -534,6 +606,13 @@ class App(object):
         self.routes = routes
         self.args = args
         self.plan = []
+        self.dist = self._build_dist()
+        self.scan_buffer = ScanBuffer()
+        self.calibrating = False
+        import rospy
+        from geometry_msgs.msg import PoseWithCovarianceStamped
+        self.initial_pub = rospy.Publisher('/initialpose', PoseWithCovarianceStamped,
+                                           queue_size=1)
         self.worker = None
         self.log_queue = queue.Queue()
         self.pose_tracker = None
@@ -552,6 +631,12 @@ class App(object):
 
         self._drain_log()
         self._poll()
+
+    def _build_dist(self):
+        import numpy as np
+        from scipy import ndimage
+        gray = np.array(self.map_img.convert('L'))
+        return ndimage.distance_transform_edt(gray >= 100) * self.res
 
     # ---------- 界面 ----------
     def _setup_fonts(self):
@@ -631,8 +716,9 @@ class App(object):
         self.resume_btn = ttk.Button(bottom, text='继续', command=self.resume, state='disabled')
         self.stop_btn = ttk.Button(bottom, text='终止', command=self.stop, state='disabled')
         snap_btn = ttk.Button(bottom, text='记录现场', command=self.snapshot)
+        self.cal_btn = ttk.Button(bottom, text='扫描校准', command=self.calibrate)
         for i, b in enumerate((self.start_btn, self.pause_btn, self.resume_btn,
-                               self.stop_btn, snap_btn)):
+                               self.stop_btn, snap_btn, self.cal_btn)):
             b.grid(row=0, column=i, padx=4, sticky='ew')
             bottom.columnconfigure(i, weight=1)
 
@@ -772,6 +858,8 @@ class App(object):
                 self.tree.selection_set(str(idx))
                 self.tree.see(str(idx))
         self._draw_pose()
+        if not self.calibrating and str(self.cal_btn['state']) == 'disabled':
+            self.cal_btn.configure(state='normal')
         self.root.after(200, self._poll)
 
     # ---------- 按钮 ----------
@@ -828,6 +916,88 @@ class App(object):
             pose_text = 'x=%.3f y=%.3f yaw=%.1f°' % (pose[0], pose[1], math.degrees(pose[2]))
         self._log('==== 现场记录 ==== 步骤=%s 状态=%s 位姿=%s 备注=%s'
                   % (step or pid, status, pose_text, note))
+
+    def calibrate(self):
+        if self.calibrating:
+            return
+        if self.worker is not None and self.worker.is_alive():
+            self._log('巡航进行中，先暂停或终止再校准')
+            return
+        self.calibrating = True
+        self.cal_btn.configure(state='disabled')
+        threading.Thread(target=self._do_calibrate, daemon=True).start()
+
+    def _do_calibrate(self):
+        import numpy as np
+        import rospy
+        import tf.transformations as tf_trans
+        from geometry_msgs.msg import PoseWithCovarianceStamped
+
+        try:
+            scan = self.scan_buffer.get()
+            if scan is None:
+                self._log('校准：没有 /scan 数据')
+                return
+            ranges = np.array(scan.ranges, dtype=float)
+            angles = scan.angle_min + np.arange(len(ranges)) * scan.angle_increment
+            valid = (np.isfinite(ranges) & (ranges > scan.range_min)
+                     & (ranges < scan.range_max))
+            idx = np.where(valid)[0]
+            if len(idx) < 20:
+                self._log('校准：有效激光点太少')
+                return
+            idx = idx[::max(1, len(idx) // 72)]
+            r = ranges[idx]
+            a = angles[idx]
+
+            tx, ty, ly = 0.0, 0.0, 0.0
+            try:
+                trans, rot = self.pose_tracker.listener.lookupTransform(
+                    'base_footprint', 'laser_link', rospy.Time(0))
+                tx, ty = trans[0], trans[1]
+                ly = tf_trans.euler_from_quaternion(rot)[2]
+            except Exception:  # noqa: BLE001
+                self._log('校准：没有 base->laser TF，按无旋转处理')
+
+            lx = r * np.cos(a)
+            ly_ = r * np.sin(a)
+            bx = lx * math.cos(ly) - ly_ * math.sin(ly) + tx
+            by = lx * math.sin(ly) + ly_ * math.cos(ly) + ty
+            points = np.column_stack([bx, by])
+
+            self._log('校准：正在用 %d 个激光点匹配地图 ...' % len(points))
+            x, y, yaw, score = estimate_pose(points, self.dist, self.res, self.ox, self.oy)
+            cur = self.pose_tracker.get()
+            if cur is not None:
+                self._log('校准：当前 TF (%.3f, %.3f, %.1f°)，匹配结果 (%.3f, %.3f, %.1f°)，得分 %.1f'
+                          % (cur[0], cur[1], math.degrees(cur[2]),
+                             x, y, math.degrees(yaw), score))
+            else:
+                self._log('校准：匹配结果 (%.3f, %.3f, %.1f°)，得分 %.1f'
+                          % (x, y, math.degrees(yaw), score))
+
+            msg = PoseWithCovarianceStamped()
+            msg.header.frame_id = self.args.map_frame
+            msg.header.stamp = rospy.Time.now()
+            msg.pose.pose.position.x = x
+            msg.pose.pose.position.y = y
+            q = tf_trans.quaternion_from_euler(0.0, 0.0, yaw)
+            msg.pose.pose.orientation.x = q[0]
+            msg.pose.pose.orientation.y = q[1]
+            msg.pose.pose.orientation.z = q[2]
+            msg.pose.pose.orientation.w = q[3]
+            cov = [0.0] * 36
+            cov[0] = cov[7] = 0.2 ** 2
+            cov[35] = 0.1 ** 2
+            msg.pose.covariance = cov
+            for _ in range(3):
+                self.initial_pub.publish(msg)
+                time.sleep(0.1)
+            self._log('校准：已发布 /initialpose，等 AMCL 收敛')
+        except Exception as exc:  # noqa: BLE001
+            self._log('校准失败：%s' % exc)
+        finally:
+            self.calibrating = False
 
     def on_close(self):
         if self.worker is not None:

@@ -78,7 +78,7 @@ def build_plan(points, order):
 
 def is_strafe_leg(prev, step, strafe_ids):
     """相邻两点都在平移点集里，且向下（y 减小）才走平移；反向走 move_base。"""
-    if prev is None:
+    if prev is None or step is None:
         return False
     return (prev['id'] in strafe_ids and step['id'] in strafe_ids
             and step['y'] < prev['y'] - 1e-6)
