@@ -10,8 +10,8 @@
        到 15、17 再原地转向识别，识别完转回行驶朝向继续平移。
 
 用法：
-    rosrun nav_demo cruise_waypoints.py --route fast --dry-run
-    rosrun nav_demo cruise_waypoints.py --route fast --dwell 3
+    rosrun nav_demo cruise_waypoints.py --route left --dry-run
+    rosrun nav_demo cruise_waypoints.py --route left --dwell 3
     rosrun nav_demo cruise_waypoints.py --order 0,1,2,3,4,5,13,12,11,9,14,15,16,17,18,19
 
 参数：
@@ -55,15 +55,27 @@ def angle_diff(a, b):
     return abs(d)
 
 
+def parse_order_item(item):
+    """'7p' 表示只经过 7 号、不执行识别任务；其余按普通点位编号。"""
+    if isinstance(item, str):
+        text = item.strip()
+        if text.lower().endswith('p'):
+            return int(text[:-1]), True
+        return int(text), False
+    return int(item), False
+
+
 def build_plan(points, order):
     plan = []
-    for pid in order:
+    for item in order:
+        pid, pass_through = parse_order_item(item)
         p = points.get(pid)
         if p is None:
             print('[警告] 点位 %s 不存在，跳过' % pid)
             continue
-        tasks = [(t.get('name', ''), float(t.get('yaw', 0.0)))
-                 for t in (p.get('tasks') or [])]
+        tasks = [] if pass_through else [
+            (t.get('name', ''), float(t.get('yaw', 0.0)))
+            for t in (p.get('tasks') or [])]
         arrive_yaw = math.radians(snap90(math.degrees(float(p.get('yaw', 0.0)))))
         plan.append({
             'id': pid,
@@ -348,11 +360,11 @@ def main():
     routes = load_yaml(args.routes).get('routes', {}) if os.path.isfile(args.routes) else {}
 
     if args.order:
-        order = [int(x) for x in args.order.replace(' ', '').split(',') if x != '']
+        order = [x for x in args.order.replace(' ', '').split(',') if x != '']
     elif args.route:
         if args.route not in routes:
             sys.exit('路线 %s 不存在，可选：%s' % (args.route, ', '.join(routes) or '(空)'))
-        order = [int(x) for x in routes[args.route]]
+        order = list(routes[args.route])
     else:
         sys.exit('需要 --route 或 --order')
 

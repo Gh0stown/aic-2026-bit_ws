@@ -44,7 +44,7 @@ source devel/setup.bash
 | 底盘速度下发（要动车必开） | `rosrun car_bringup newt.py` |
 | 键盘遥控 | `roslaunch mbot_teleop mbot_teleop.launch` |
 | 导航（雷达/定位/规划/rviz） | `roslaunch ~/bit_ws/src/nav777.launch` |
-| 图形化巡航（当前主用） | `rosrun nav_demo cruise_debug.py --route fast` |
+| 图形化巡航（当前主用） | `rosrun nav_demo cruise_debug.py --route left` |
 | 记录巡检点位 | `rosrun nav_demo waypoint_gui.py` |
 | 拍照 / 模型测试 | `rosrun photo_capture capture_photos.py` |
 | 区域扫描拼图 | `rosrun photo_capture capture_photos.py --mode scan` |
@@ -65,7 +65,7 @@ rosrun car_bringup newt.py
 rosrun nav_demo waypoint_gui.py
 
 # 3) 巡航（沿用上一步的导航，不用重开）
-rosrun nav_demo cruise_debug.py --route fast
+rosrun nav_demo cruise_debug.py --route left
 ```
 
 > `newt.py` 负责把 `/cmd_vel` 写给底盘，建图和导航的 launch 里只有读串口的
@@ -112,16 +112,16 @@ docs/                                设计记录
 | 预设点位 | `src/nav_demo/config/inspection_points.yaml` |
 | 路线顺序 | `src/nav_demo/config/inspection_routes.yaml` |
 
-现成路线：`left`、`right`、`fast`（实车走法），以及调试用的 `test_789`、`test_strafe`、`test_15`。
+现成路线：`left`（左转，原 fast）、`straight`（直行），以及调试用的 `test_789`、`test_strafe`、`test_15`。
 
 **换地图后点位要重记**，旧坐标对新图不成立。
 
 ## 巡航
 
-- **图形化（当前主用）**：`rosrun nav_demo cruise_debug.py --route fast`
+- **图形化（当前主用）**：`rosrun nav_demo cruise_debug.py --route left`
   顶部选路线 / 填点位顺序 / 停留时间 / 平移速度 / 跳过 0 号点，底部 开始 / 暂停 / 继续 / 终止 / 记录现场 / 扫描校准，
   计划表会标出每点是 `move_base`、平移还是倒车入库，以及识别朝向。
-- **命令行（早期版本）**：`rosrun nav_demo cruise_waypoints.py --route fast --dry-run`，
+- **命令行（早期版本）**：`rosrun nav_demo cruise_waypoints.py --route left --dry-run`，
   没有倒车入库、扫描校准、跳过 0 号点，主要用于快速看计划。
 - 14→18 段用麦轮平移（只发 `linear.y`），15、17 会停车转向做识别；
 - 19 号是终点，最后一段是倒车入库：先对齐 18，转到 0°（朝红绿灯），再倒进 19，对准到 2cm。

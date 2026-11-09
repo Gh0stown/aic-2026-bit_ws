@@ -15,7 +15,7 @@
 
 用法：
     rosrun nav_demo cruise_debug.py
-    rosrun nav_demo cruise_debug.py --route fast
+    rosrun nav_demo cruise_debug.py --route left
 """
 
 import argparse
@@ -944,17 +944,17 @@ class App(object):
         text = self.order_var.get().strip()
         if text:
             try:
-                order = [int(x) for x in text.replace(' ', '').split(',') if x != '']
+                order = [x for x in text.replace(' ', '').split(',') if x != '']
             except ValueError:
                 self._log('顺序格式不对：%s' % text)
                 return []
-            if self.skip0_var.get() and order and order[0] == 0:
+            if self.skip0_var.get() and order and str(order[0]).rstrip('pP') == '0':
                 order = order[1:]
             return order
         route = self.route_var.get()
         if route in self.routes:
-            order = [int(x) for x in self.routes[route]]
-            if self.skip0_var.get() and order and order[0] == 0:
+            order = list(self.routes[route])
+            if self.skip0_var.get() and order and str(order[0]).rstrip('pP') == '0':
                 order = order[1:]
             return order
         return []

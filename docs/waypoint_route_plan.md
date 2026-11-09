@@ -74,13 +74,13 @@ rosrun nav_demo waypoint_gui.py               # 图形界面
 
 ```bash
 # 只看计划（不动车）
-rosrun nav_demo cruise_waypoints.py --route fast --dry-run
+rosrun nav_demo cruise_waypoints.py --route left --dry-run
 
 # 实跑，每个识别朝向停 3 秒
-rosrun nav_demo cruise_waypoints.py --route fast --dwell 3
+rosrun nav_demo cruise_waypoints.py --route left --dwell 3
 ```
 
-- 路线顺序：`src/nav_demo/config/inspection_routes.yaml`（left / right / fast）
+- 路线顺序：`src/nav_demo/config/inspection_routes.yaml`（left / straight）
 - 点位与识别朝向：`src/nav_demo/waypoints/inspection_waypoints.yaml`
 - 平移相关参数：`--strafe-ids 14,15,16,17,18`、`--strafe-speed 0.06`、`--no-strafe`
 - 退出（Ctrl-C）会取消 move_base 目标，避免脚本停了车还在跑
@@ -89,10 +89,10 @@ rosrun nav_demo cruise_waypoints.py --route fast --dwell 3
 ## 图形化巡航（cruise_debug.py，推荐）
 
 ```bash
-rosrun nav_demo cruise_debug.py --route fast
+rosrun nav_demo cruise_debug.py --route left
 ```
 
-- 顶部选路线（left/right/fast）或填点位顺序，点“载入计划”；
+- 顶部选路线（left / straight）或填点位顺序，点“载入计划”；
 - 左侧地图显示点位、路线、当前目标（橙圈）和实时位姿（红箭头）；
 - 右侧是执行列表和日志；
 - 底部：开始 / 暂停 / 继续 / 终止 / 记录现场；
