@@ -216,7 +216,7 @@ class CruiseWorker(threading.Thread):
                  log_fn, on_status, pose_get=None, base_frame='base_footprint',
                  run_timer=None, drive_long=DRIVE_SPEED_LONG,
                  drive_mid=DRIVE_SPEED_MID, drive_short=DRIVE_SPEED_SHORT,
-                 rot_speed=1.00, reverse_speed=0.18):
+                 rot_speed=1.00, reverse_speed=0.30):
         super(CruiseWorker, self).__init__(daemon=True)
         self.plan = plan
         self.dwell = dwell
@@ -885,7 +885,7 @@ class App(object):
         ttk.Spinbox(speed_frame, from_=0.20, to=1.00, increment=0.05, width=5,
                     textvariable=self.rot_speed_var).pack(side='left', padx=(2, 12))
         ttk.Label(speed_frame, text='倒车 m/s').pack(side='left')
-        self.reverse_speed_var = tk.StringVar(value='0.18')
+        self.reverse_speed_var = tk.StringVar(value='0.30')
         ttk.Spinbox(speed_frame, from_=0.05, to=0.30, increment=0.01, width=5,
                     textvariable=self.reverse_speed_var).pack(side='left', padx=(2, 12))
         ttk.Label(speed_frame, text='（点击“开始”时生效）').pack(side='left')
