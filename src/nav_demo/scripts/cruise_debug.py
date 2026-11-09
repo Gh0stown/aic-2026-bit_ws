@@ -218,7 +218,7 @@ class CruiseWorker(threading.Thread):
         self.plan = plan
         self.dwell = dwell
         self.strafe_ids = strafe_ids
-        self.strafe_speed = max(0.02, min(0.10, float(strafe_speed)))
+        self.strafe_speed = max(0.02, min(0.15, float(strafe_speed)))
         self.map_frame = map_frame
         self.base_frame = base_frame
         self.log_fn = log_fn
@@ -521,7 +521,7 @@ class CruiseWorker(threading.Thread):
                     self.log('    转向超时（目标 %.0f°）' % math.degrees(target))
                     return False
                 # 比例控制，接近目标自动减速，避免一侧轮子突然发力
-                cmd = min(0.4, max(0.20, 1.5 * abs(err)))
+                cmd = min(0.55, max(0.20, 1.5 * abs(err)))
                 twist = Twist()
                 twist.angular.z = (1.0 if err > 0 else -1.0) * cmd
                 self._pub.publish(twist)
@@ -847,7 +847,7 @@ class App(object):
 
         ttk.Label(top, text='平移 m/s').pack(side='left')
         self.speed_var = tk.StringVar(value=str(self.args.strafe_speed))
-        ttk.Spinbox(top, from_=0.02, to=0.10, increment=0.01, width=5,
+        ttk.Spinbox(top, from_=0.02, to=0.15, increment=0.01, width=5,
                     textvariable=self.speed_var).pack(side='left', padx=(4, 12))
 
         self.skip0_var = tk.BooleanVar(value=True)
@@ -1070,7 +1070,7 @@ class App(object):
         self.current_id = None
         self._draw_highlight()
         dwell = float(self.dwell_var.get())
-        speed = max(0.02, min(0.10, float(self.speed_var.get())))
+        speed = max(0.02, min(0.15, float(self.speed_var.get())))
         self.speed_var.set('%.2f' % speed)
         self.run_timer = CruiseTimer()
         self.log_file.write('\n===== 开始巡航 %s =====\n'
@@ -1226,7 +1226,7 @@ def main():
     ap.add_argument('--route', default=None)
     ap.add_argument('--dwell', type=float, default=2.0)
     ap.add_argument('--strafe-ids', default=DEFAULT_STRAFE_IDS)
-    ap.add_argument('--strafe-speed', type=float, default=0.10)
+    ap.add_argument('--strafe-speed', type=float, default=0.15)
     ap.add_argument('--no-strafe', action='store_true')
     ap.add_argument('--map', default=DEFAULT_MAP)
     ap.add_argument('--map-frame', default='map')
