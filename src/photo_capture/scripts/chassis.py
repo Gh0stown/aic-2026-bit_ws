@@ -235,7 +235,7 @@ class ChassisController:
     # -- 运动 ---------------------------------------------------------
     def strafe(self, distance: float, speed: float, direction: str,
                stop_event=None, clearance: Optional[float] = None,
-               feedback: Optional[str] = None) -> dict:
+               feedback: Optional[str] = None, on_tick=None) -> dict:
         distance = max(0.01, min(5.0, float(distance)))
         speed = max(0.02, min(0.15, float(speed)))
         sign = 1.0 if direction != "right" else -1.0
@@ -281,6 +281,11 @@ class ChassisController:
                 elif now - started >= distance / speed:
                     moved = distance
                     break
+                if on_tick is not None:
+                    try:
+                        on_tick()
+                    except Exception:
+                        pass
                 time.sleep(0.02)
         finally:
             self.stop()

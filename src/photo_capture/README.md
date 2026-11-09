@@ -152,6 +152,8 @@ rosrun photo_capture capture_photos.py --mode detect --no-gui --model fire.pt
 - 优先用 `cv2.Stitcher_SCANS`（平移扫描）；失败自动换 `PANORAMA`，再失败走
   相邻帧 ORB + RANSAC 单应兜底；
 - 拼接失败不会丢帧，原始帧都在 `frames/`，可以调参数重拼；
+- 勾选“保存扫掠视频”后会连续写 `sweep.avi`（默认 15fps），不是每步一张的幻灯片；
+  适合后续用 YOLO 跟踪/计数，也可以 `ffmpeg -i sweep.avi -vf fps=2 frames/%04d.jpg` 抽帧；
 - 拼接时每帧会缩到 `--stitch-max-width`（默认 1600）以内，控制内存。
 
 保存结构：
@@ -161,7 +163,7 @@ rosrun photo_capture capture_photos.py --mode detect --no-gui --model fire.pt
 ├── frames/
 │   ├── 0001.jpg
 │   └── ...
-├── sweep.avi                 # 勾选“保存扫掠视频”时
+├── sweep.avi                 # 勾选“保存扫掠视频”时，连续录制（默认 15fps）
 ├── panorama.jpg              # 拼接成功时
 ├── panorama_detected.jpg     # 全景检测后
 └── meta.json                 # 参数、帧、位姿、拼接/检测结果
@@ -322,7 +324,8 @@ rosrun photo_capture capture_photos.py --no-gui --mode gauge \
 | `--scan-feedback` | `auto` | `auto` / `odom` / `time` |
 | `--scan-clearance` | `0.25` | 平移前雷达净空（米），0 关闭 |
 | `--stitch-max-width` | `1600` | 参与拼接的单帧最大宽度 |
-| `--scan-record-video` | 关 | 保存 `sweep.avi` |
+| `--scan-record-video` | 关 | 连续保存 `sweep.avi`（默认 15fps，用于跟踪/抽帧） |
+| `--scan-video-fps` | `15` | `sweep.avi` 帧率（5~30） |
 | `--no-stitch` | 关 | 只采集不拼接 |
 | `--scan-dry-run` | 关 | 干跑，不连接 ROS、不产生真实运动 |
 | `--detect-panorama` | 关 | 拼接后用 YOLO 分块检测 |

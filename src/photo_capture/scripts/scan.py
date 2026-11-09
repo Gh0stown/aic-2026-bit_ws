@@ -57,6 +57,7 @@ class ScanSettings:
     feedback: str = "auto"        # auto / odom / time
     clearance: float = 0.25
     fps: float = 3.0              # manual 模式抽帧帧率
+    video_fps: float = 15.0       # 连续视频录制帧率
     quality: int = 95
 
     def validate(self) -> "ScanSettings":
@@ -68,6 +69,7 @@ class ScanSettings:
         self.settle = max(0.1, min(3.0, float(self.settle)))
         self.direction = "right" if str(self.direction).lower() == "right" else "left"
         self.fps = max(1.0, min(10.0, float(self.fps)))
+        self.video_fps = max(5.0, min(30.0, float(self.video_fps)))
         self.quality = max(50, min(100, int(self.quality)))
         self.label = sanitize_label(self.label)
         if self.mode == "strafe" and self.frames > 1:
@@ -122,6 +124,8 @@ class ScanSession:
                 "settle": settings.settle,
                 "feedback": settings.feedback,
                 "fps": settings.fps,
+                "record_video": bool(settings.record_video),
+                "video_fps": settings.video_fps,
             },
             "frames": [],
             "stitch": None,
@@ -154,11 +158,17 @@ class ScanSession:
             self._write_video(frame)
         return path
 
+    def write_video_frame(self, frame) -> None:
+        """写入一帧连续视频（用于扫掠过程，不影响 frames/ 的抽帧）。"""
+        if frame is None or not self.settings.record_video:
+            return
+        self._write_video(frame)
+
     def _write_video(self, frame) -> None:
         if self._video is None:
             height, width = frame.shape[:2]
             self._video_size = (width, height)
-            fps = max(2.0, min(15.0, self.settings.fps if self.settings.mode == "manual" else 2.0))
+            fps = self.settings.video_fps
             fourcc = cv2.VideoWriter_fourcc(*"MJPG")
             self._video = cv2.VideoWriter(
                 str(self.directory / "sweep.avi"), fourcc, fps, self._video_size)
@@ -358,6 +368,21 @@ class ScanJob:
 
         self._capture(1, total, "起始位置")
         step = self.settings.step_m
+        last_video = [0.0]
+
+        def video_tick() -> None:
+            # 平移过程中连续录视频，供后续 YOLO 跟踪/计数；
+            # 每步停稳时 _capture 还会补一帧。
+            if not self.settings.record_video:
+                return
+            now = time.monotonic()
+            if now - last_video[0] < 1.0 / self.settings.video_fps:
+                return
+            last_video[0] = now
+            frame = self.camera.read()
+            if frame is not None:
+                self.session.write_video_frame(frame)
+
         for index in range(1, total):
             if self._stop.is_set():
                 raise ScanAborted()
@@ -368,6 +393,7 @@ class ScanJob:
                 stop_event=self._stop,
                 clearance=self.settings.clearance,
                 feedback=self.settings.feedback,
+                on_tick=video_tick,
             )
             self._sleep(self.settings.settle)
             self._capture(index + 1, total, "第 {} 步".format(index))
@@ -378,6 +404,7 @@ class ScanJob:
         interval = 1.0 / max(1.0, self.settings.fps)
         next_capture = time.monotonic()
         preview_at = 0.0
+        last_video = 0.0
         index = 0
         while not self._stop.is_set():
             frame = self.camera.read()
@@ -388,6 +415,10 @@ class ScanJob:
             if now - preview_at >= 0.05:
                 preview_at = now
                 self._preview(frame)
+            if (self.settings.record_video
+                    and now - last_video >= 1.0 / self.settings.video_fps):
+                last_video = now
+                self.session.write_video_frame(frame)
             if now >= next_capture:
                 index += 1
                 self.session.add_frame(frame, pose=None)

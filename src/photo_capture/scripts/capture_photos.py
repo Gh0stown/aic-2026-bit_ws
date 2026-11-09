@@ -3231,6 +3231,7 @@ def run_gui_scan(args, output_root: Path, root) -> int:
         feedback=args.scan_feedback,
         clearance=args.scan_clearance,
         fps=args.scan_fps,
+        video_fps=args.scan_video_fps,
         quality=args.quality,
     )
     dialog = ScanDialog(root, defaults)
@@ -3735,6 +3736,7 @@ def run_scan_cli(args, output_root: Path) -> int:
             feedback=args.scan_feedback,
             clearance=args.scan_clearance,
             fps=args.scan_fps,
+            video_fps=args.scan_video_fps,
             quality=args.quality,
         ).validate()
     except Exception as error:
@@ -4231,6 +4233,8 @@ def parse_args(argv=None):
                         help="每步停稳时间秒（默认 0.5）")
     parser.add_argument("--scan-fps", type=float, default=3.0,
                         help="手动录制抽帧帧率（默认 3）")
+    parser.add_argument("--scan-video-fps", type=float, default=15.0,
+                        help="sweep.avi 连续录制帧率（默认 15）")
     parser.add_argument("--scan-label", default="",
                         help="区域名称（默认时间戳）")
     parser.add_argument("--scan-feedback", choices=("auto", "odom", "time"),
