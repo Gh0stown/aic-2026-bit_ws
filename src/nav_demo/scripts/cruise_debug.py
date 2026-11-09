@@ -544,13 +544,16 @@ class CruiseWorker(threading.Thread):
         from geometry_msgs.msg import Twist
 
         started = time.monotonic()
+        paused = 0.0
         rate = rospy.Rate(20)
         try:
             while not self._stop_evt.is_set():
                 if not self._resume.is_set():
+                    t_pause = time.monotonic()
                     self._stop_motion()
                     if not self._wait_if_paused():
                         return False
+                    paused += time.monotonic() - t_pause
                     continue
                 pose = self._map_pose()
                 if pose is None:
@@ -560,7 +563,7 @@ class CruiseWorker(threading.Thread):
                 dist = math.hypot(ex, ey)
                 if dist <= tol:
                     return True
-                if time.monotonic() - started > timeout:
+                if time.monotonic() - started - paused > timeout:
                     self.log('    最终对准超时（剩余 %.2f m）' % dist)
                     return False
                 yaw = pose[2]
