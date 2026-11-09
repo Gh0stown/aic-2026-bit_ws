@@ -42,6 +42,8 @@ PKG_DIR = os.path.dirname(THIS_DIR)
 DEFAULT_MAP = os.path.join(PKG_DIR, 'map', 'mymap_20261106_1916_clean.yaml')
 
 MAP_W, MAP_H = 578, 484
+LONG_LEG_MIN = 1.0   # 超过这个距离的直线段用闭环
+DRIVE_SPEED = 0.28   # 闭环直线速度 m/s
 
 
 class CruiseTimer(object):
@@ -677,20 +679,37 @@ class CruiseWorker(threading.Thread):
                         timeout=dist / self.strafe_speed * 2.0 + 5.0,
                         hold_yaw=step['yaw'])
                 else:
+                    pose = self._map_pose()
                     bearing = self._bearing_to(step['x'], step['y'])
                     if bearing is None:
                         bearing = step['yaw']
                         self.log('  没有位姿，按记录朝向行驶')
-                    self.log('  预转向到方位 %.0f°' % math.degrees(bearing))
-                    self._rotate_to(bearing, '对准 %s' % step['id'])
-                    if self._stop_evt.is_set():
-                        break
-                    arrived = self._send_goal(step['x'], step['y'], bearing,
-                                              '点位 %s' % step['id'])
+                    dist_to_goal = (math.hypot(step['x'] - pose[0], step['y'] - pose[1])
+                                    if pose is not None else None)
+                    close = dist_to_goal is not None and dist_to_goal < 0.25
+                    goal_yaw = step['yaw'] if close else bearing
+                    if close:
+                        self.log('  距点位 %.2f m，跳过预转向，按记录朝向过去' % dist_to_goal)
+                    else:
+                        self.log('  预转向到方位 %.0f°' % math.degrees(bearing))
+                        self._rotate_to(bearing, '对准 %s' % step['id'])
+                        if self._stop_evt.is_set():
+                            break
+                    if (not close and dist_to_goal is not None
+                            and dist_to_goal > LONG_LEG_MIN):
+                        self.log('  长直线闭环 %.2f m' % dist_to_goal)
+                        arrived = self._align_to(
+                            step['x'], step['y'], tol=0.02,
+                            speed=DRIVE_SPEED,
+                            timeout=dist_to_goal / DRIVE_SPEED * 2.0 + 5.0,
+                            hold_yaw=bearing)
+                    else:
+                        arrived = self._send_goal(step['x'], step['y'], goal_yaw,
+                                                  '点位 %s' % step['id'])
                     # 有识别任务时不再先转“到达朝向”，直接让第一个识别朝向去转，
                     # 少一次来回；只有无任务且下一段是平移时才需要先摆正
                     if arrived and not step['tasks'] and next_is_strafe:
-                        if abs(self._norm_angle(step['yaw'] - bearing)) > 0.05:
+                        if abs(self._norm_angle(step['yaw'] - goal_yaw)) > 0.05:
                             self.log('  到点转到 %.0f°' % math.degrees(step['yaw']))
                             self._rotate_to(step['yaw'], '到达朝向')
                             if self._stop_evt.is_set():
