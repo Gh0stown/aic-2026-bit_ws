@@ -794,6 +794,11 @@ class App(object):
         from geometry_msgs.msg import PoseWithCovarianceStamped
         self.initial_pub = rospy.Publisher('/initialpose', PoseWithCovarianceStamped,
                                            queue_size=1)
+        from geometry_msgs.msg import Twist
+        self._twist_cls = Twist
+        self.teleop_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
+        self.teleop_keys = {}
+        self._teleop_active = False
         self.worker = None
         self.log_queue = queue.Queue()
         self.pose_tracker = None
@@ -813,6 +818,7 @@ class App(object):
 
         self._drain_log()
         self._poll()
+        self._teleop_tick()
 
     def _build_dist(self):
         import numpy as np
@@ -900,6 +906,8 @@ class App(object):
         self.canvas.pack()
         self.pose_var = tk.StringVar(value='位姿：等待 map -> base_footprint')
         ttk.Label(left, textvariable=self.pose_var).pack(anchor='w', pady=(4, 0))
+        ttk.Label(left, text='暂停后键盘：W/S 前后  A/D 平移  Q/E 旋转  空格停',
+                  foreground='#666').pack(anchor='w')
 
         right = ttk.Frame(body)
         right.pack(side='left', fill='both', expand=True, padx=(8, 0))
@@ -925,13 +933,15 @@ class App(object):
         self.resume_btn = ttk.Button(bottom, text='继续', command=self.resume, state='disabled')
         self.stop_btn = ttk.Button(bottom, text='终止', command=self.stop, state='disabled')
         snap_btn = ttk.Button(bottom, text='记录现场', command=self.snapshot)
+        rec_btn = ttk.Button(bottom, text='记录点位', command=self.record_point)
         self.cal_btn = ttk.Button(bottom, text='扫描校准', command=self.calibrate)
         for i, b in enumerate((self.start_btn, self.pause_btn, self.resume_btn,
-                               self.stop_btn, snap_btn, self.cal_btn)):
+                               self.stop_btn, snap_btn, rec_btn, self.cal_btn)):
             b.grid(row=0, column=i, padx=4, sticky='ew')
             bottom.columnconfigure(i, weight=1)
 
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
+        self.root.bind_all('<KeyPress>', self._on_key)
 
     # ---------- 地图 ----------
     def _select_route(self, route):
@@ -973,8 +983,10 @@ class App(object):
         for idx, step in enumerate(self.plan):
             if idx == len(self.plan) - 1 and step['id'] == 19:
                 mode = '倒车入库'
+            elif is_strafe_leg(prev, step, self._strafe_ids()):
+                mode = '平移'
             else:
-                mode = '平移' if is_strafe_leg(prev, step, self._strafe_ids()) else 'move_base'
+                mode = '闭环直线'
             tasks = ' → '.join('%s %.0f°' % (n, math.degrees(y)) for n, y in step['tasks']) \
                 or '—'
             self.tree.insert('', 'end', iid=str(idx),
@@ -1104,6 +1116,9 @@ class App(object):
             return
         self.current_id = None
         self._draw_highlight()
+        self.teleop_keys.clear()
+        self._teleop_zero()
+        self._teleop_active = False
         dwell = float(self.dwell_var.get())
         speed = max(0.02, min(0.15, float(self.speed_var.get())))
         self.speed_var.set('%.2f' % speed)
@@ -1138,17 +1153,26 @@ class App(object):
     def pause(self):
         if self.worker is not None:
             self.worker.pause()
+            self.teleop_keys.clear()
+            self._teleop_zero()
+            self._teleop_active = False
             self.pause_btn.configure(state='disabled')
             self.resume_btn.configure(state='normal')
 
     def resume(self):
         if self.worker is not None:
+            self.teleop_keys.clear()
+            self._teleop_zero()
+            self._teleop_active = False
             self.worker.resume()
             self.pause_btn.configure(state='normal')
             self.resume_btn.configure(state='disabled')
 
     def stop(self):
         if self.worker is not None:
+            self.teleop_keys.clear()
+            self._teleop_zero()
+            self._teleop_active = False
             self.worker.stop()
             self.pause_btn.configure(state='disabled')
             self.resume_btn.configure(state='disabled')
@@ -1166,6 +1190,89 @@ class App(object):
             pose_text = 'x=%.3f y=%.3f yaw=%.1f°' % (pose[0], pose[1], math.degrees(pose[2]))
         self._log('==== 现场记录 ==== 步骤=%s 状态=%s 位姿=%s 备注=%s'
                   % (step or pid, status, pose_text, note))
+
+    def record_point(self):
+        """记录当前位姿和备注，写到当前巡航日志里，附最近点位和 YAML 参考。"""
+        from tkinter import simpledialog
+        pose = self.pose_tracker.get() if self.pose_tracker else None
+        if pose is None:
+            self._log('点位记录：还没有位姿数据')
+            return
+        nearest_id, nearest_name, nearest_dist = None, '', 1e9
+        for pid, p in self.points.items():
+            d = math.hypot(pose[0] - float(p['x']), pose[1] - float(p['y']))
+            if d < nearest_dist:
+                nearest_id, nearest_name, nearest_dist = pid, p.get('name', ''), d
+        note = simpledialog.askstring('记录点位', '备注（可留空）：', parent=self.root) or ''
+        self._log('点位记录：x=%.3f y=%.3f yaw=%.1f° 最近=%s %s（%.2f m） 备注=%s'
+                  % (pose[0], pose[1], math.degrees(pose[2]),
+                     nearest_id, nearest_name, nearest_dist, note))
+        if nearest_dist < 0.5:
+            self._log('  YAML 参考：id=%s x=%.3f y=%.3f yaw_deg=%.1f'
+                      % (nearest_id, pose[0], pose[1], math.degrees(pose[2])))
+
+    def _teleop_enabled(self):
+        # 只在巡航暂停时开放键盘，避免未开始时误碰底盘
+        if self.worker is None or not self.worker.is_alive():
+            return False
+        _step, status, _pid, _idx = self.worker.status()
+        return status == '已暂停'
+
+    def _teleop_zero(self):
+        try:
+            self.teleop_pub.publish(self._twist_cls())
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_key(self, event):
+        import tkinter as tk
+        from tkinter import ttk
+        if not self._teleop_enabled():
+            return
+        focus = self.root.focus_get()
+        if isinstance(focus, (tk.Entry, tk.Text, ttk.Entry, ttk.Spinbox, ttk.Combobox)):
+            return
+        key = event.keysym.lower()
+        if key in ('w', 'a', 's', 'd', 'q', 'e'):
+            self.teleop_keys[key] = time.monotonic()
+        elif key == 'space':
+            self.teleop_keys.clear()
+            self._teleop_zero()
+            self._teleop_active = False
+
+    def _teleop_tick(self):
+        try:
+            if self._teleop_enabled():
+                now = time.monotonic()
+                active = {k: t for k, t in self.teleop_keys.items() if now - t < 0.3}
+                self.teleop_keys = active
+                if active:
+                    twist = self._twist_cls()
+                    v = 0.12
+                    if 'w' in active:
+                        twist.linear.x += v
+                    if 's' in active:
+                        twist.linear.x -= v
+                    if 'a' in active:
+                        twist.linear.y += v
+                    if 'd' in active:
+                        twist.linear.y -= v
+                    if 'q' in active:
+                        twist.angular.z += 0.5
+                    if 'e' in active:
+                        twist.angular.z -= 0.5
+                    self.teleop_pub.publish(twist)
+                    self._teleop_active = True
+                elif self._teleop_active:
+                    self._teleop_zero()
+                    self._teleop_active = False
+            else:
+                self.teleop_keys.clear()
+                if self._teleop_active:
+                    self._teleop_zero()
+                    self._teleop_active = False
+        finally:
+            self.root.after(50, self._teleop_tick)
 
     def calibrate(self):
         if self.calibrating:
@@ -1250,6 +1357,8 @@ class App(object):
             self.calibrating = False
 
     def on_close(self):
+        self.teleop_keys.clear()
+        self._teleop_zero()
         if self.worker is not None:
             self.worker.stop()
             self.worker.finish_timing()
