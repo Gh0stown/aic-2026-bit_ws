@@ -687,7 +687,9 @@ class CruiseWorker(threading.Thread):
                         break
                     arrived = self._send_goal(step['x'], step['y'], bearing,
                                               '点位 %s' % step['id'])
-                    if arrived and (step['tasks'] or next_is_strafe):
+                    # 有识别任务时不再先转“到达朝向”，直接让第一个识别朝向去转，
+                    # 少一次来回；只有无任务且下一段是平移时才需要先摆正
+                    if arrived and not step['tasks'] and next_is_strafe:
                         if abs(self._norm_angle(step['yaw'] - bearing)) > 0.05:
                             self.log('  到点转到 %.0f°' % math.degrees(step['yaw']))
                             self._rotate_to(step['yaw'], '到达朝向')
@@ -829,7 +831,7 @@ class App(object):
         ttk.Spinbox(top, from_=0.02, to=0.10, increment=0.01, width=5,
                     textvariable=self.speed_var).pack(side='left', padx=(4, 12))
 
-        self.skip0_var = tk.BooleanVar(value=False)
+        self.skip0_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text='跳过0号点', variable=self.skip0_var,
                         command=self._reload_plan).pack(side='left', padx=(0, 10))
         ttk.Button(top, text='载入计划', command=self._reload_plan).pack(side='left')
@@ -1205,7 +1207,7 @@ def main():
     ap.add_argument('--route', default=None)
     ap.add_argument('--dwell', type=float, default=2.0)
     ap.add_argument('--strafe-ids', default=DEFAULT_STRAFE_IDS)
-    ap.add_argument('--strafe-speed', type=float, default=0.06)
+    ap.add_argument('--strafe-speed', type=float, default=0.10)
     ap.add_argument('--no-strafe', action='store_true')
     ap.add_argument('--map', default=DEFAULT_MAP)
     ap.add_argument('--map-frame', default='map')
