@@ -7,6 +7,7 @@ catkin_package()
 
 catkin_install_python(PROGRAMS
   scripts/capture_photos.py
+  scripts/count_video.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

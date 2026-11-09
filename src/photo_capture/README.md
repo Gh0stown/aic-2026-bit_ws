@@ -169,6 +169,46 @@ rosrun photo_capture capture_photos.py --mode detect --no-gui --model fire.pt
 └── meta.json                 # 参数、帧、位姿、拼接/检测结果
 ```
 
+### 视频识别与唯一数量（推荐用于清点电动车）
+
+扫描时勾选「保存扫掠视频」，或命令行加 `--scan-record-video`；扫描完成后对
+`sweep.avi` 做 YOLO + ByteTrack，统计**唯一 track ID**，不是把每帧检测数相加。
+
+```bash
+# 先采集（会打开扫描窗口，确认后开始）
+rosrun photo_capture capture_photos.py --mode scan \
+  --scan-frames 8 --scan-distance 2.0 \
+  --scan-speed 0.15 --scan-feedback odom \
+  --scan-record-video --scan-video-fps 15 \
+  --scan-label 电动车采集_01
+```
+
+采集完成后：
+
+```bash
+python3 /home/mowen/bit_ws/src/photo_capture/scripts/count_video.py \
+  --video ~/Pictures/photo_capture/区域扫描/电动车采集_01_<时间戳>/sweep.avi \
+  --model /home/mowen/AI视觉/Cycle.pt \
+  --min-frames 20
+```
+
+输出目录默认在视频同目录下 `识别_<时间戳>_<视频名>/`，包含：
+
+- `count.txt`：总数和分类数量；
+- `track_summary.json`：每条唯一轨迹的类别、帧数、首末帧、置信度；
+- `sweep_tracked.avi`：只画最终唯一轨迹的标注视频；
+- `<类别>_<ID>.jpg`：每个唯一目标的裁剪图；
+- `tracks_contact.jpg`：所有唯一目标的缩略图总览。
+
+计数调参：
+
+- 数量偏多：提高 `--min-frames`（例如 30/40），过滤重复框和短碎片；
+- 数量偏少：降低 `--min-frames` 或 `--conf`，或换更好的模型；
+- `UP` / `DOWN` 按每条轨迹的类别投票，不按单帧；
+- ByteTrack 需要 `lap`；本机已装，其他机器可 `pip3 install lap`（或手动装对应 Python 版本的 wheel）。
+
+注意：**逐帧检测后相加一定会重复**；只有跟踪得到的唯一 ID 才能当数量。
+
 ### 全景检测
 
 拼接成功后点「检测全景」（或 CLI 加 `--detect-panorama`）：
