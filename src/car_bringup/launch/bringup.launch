@@ -1,0 +1,50 @@
+<!--
+  底盘/传感器 bringup（不启动建图、不启动 rviz）
+
+  给拍照脚本的区域扫描提供：
+    /scan  激光
+    /odom  轮式里程计 + IMU 的 EKF 融合结果
+    odom -> base_footprint TF
+
+  用法：
+    roslaunch /home/mowen/bit_ws/src/car_bringup/launch/bringup.launch
+  另开终端启动速度节点：
+    rosrun car_bringup newt.py
+
+  如果已经启动 nav777.launch / karto.launch，它们已经包含这些节点，不要重复启动。
+-->
+<launch>
+  <!-- 雷达：发布 /scan -->
+  <include file="$(find lslidar_driver)/launch/lslidar_serial.launch" />
+
+  <!-- 机器人模型：base_footprint -> base_link -->
+  <include file="$(find mowen)/launch/display.launch" />
+
+  <!-- IMU -->
+  <include file="$(find wit_ros_imu)/launch/wit_imu.launch" />
+
+  <!-- 底盘速度下发 -->
+  <node pkg="car_bringup" name="pubv" type="pubv.py" />
+
+  <!-- 轮式里程计：发布 /odom_raw -->
+  <node pkg="car_bringup" type="base_node" name="odometry_publisher">
+    <param name="odom_frame" type="string" value="odom"/>
+    <param name="base_footprint_frame" type="string" value="base_footprint"/>
+    <param name="linear_scale_x" type="double" value="1.0"/>
+    <param name="linear_scale_y" type="double" value="1.0"/>
+    <remap from="/sub_vel" to="/vel_raw"/>
+    <remap from="/pub_odom" to="/odom_raw"/>
+  </node>
+
+  <!-- EKF：融合轮式里程计 + IMU，发布 /odom 和 odom -> base_footprint -->
+  <node pkg="robot_localization" type="ekf_localization_node"
+        name="ekf_localization" output="screen">
+    <remap from="odometry/filtered" to="odom"/>
+    <remap from="/imu0" to="/wit/imu"/>
+    <remap from="/odom0" to="/odom_raw"/>
+    <param name="odom_frame" value="odom"/>
+    <param name="world_frame" value="odom"/>
+    <param name="base_link_frame" value="base_footprint"/>
+    <rosparam command="load" file="$(find car_bringup)/param/robot_localization.yaml"/>
+  </node>
+</launch>
