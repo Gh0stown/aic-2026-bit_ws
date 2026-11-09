@@ -44,6 +44,55 @@ DEFAULT_MAP = os.path.join(PKG_DIR, 'map', 'mymap_20261106_1916_clean.yaml')
 MAP_W, MAP_H = 578, 484
 
 
+class CruiseTimer(object):
+    """统计一轮的墙钟经过时间和人工暂停时间，不参与运动超时控制。"""
+
+    def __init__(self, clock=None):
+        self._clock = clock or time.monotonic
+        self._lock = threading.Lock()
+        self._started = self._clock()
+        self._ended = None
+        self._pause_started = None
+        self._paused = 0.0
+
+    def pause(self):
+        with self._lock:
+            if self._ended is None and self._pause_started is None:
+                self._pause_started = self._clock()
+
+    def resume(self):
+        with self._lock:
+            if self._ended is None and self._pause_started is not None:
+                self._paused += self._clock() - self._pause_started
+                self._pause_started = None
+
+    def _snapshot(self):
+        now = self._ended if self._ended is not None else self._clock()
+        total = max(0.0, now - self._started)
+        paused = self._paused
+        if self._pause_started is not None:
+            paused += now - self._pause_started
+        return {'total': total, 'paused': paused,
+                'active': max(0.0, total - paused),
+                'finished': self._ended is not None}
+
+    def snapshot(self):
+        with self._lock:
+            return self._snapshot()
+
+    def finish(self):
+        with self._lock:
+            if self._ended is None:
+                self._ended = self._clock()
+            return self._snapshot()
+
+
+def format_duration(seconds):
+    # 先按 0.1 秒取整，再分解，避免出现“0 分 60.0 秒”。
+    tenths = int(round(max(0.0, seconds) * 10))
+    return '%d 分 %04.1f 秒' % (tenths // 600, (tenths % 600) / 10.0)
+
+
 def load_map(yaml_path):
     meta = load_yaml(yaml_path)
     image = meta.get('image')
@@ -161,7 +210,8 @@ def estimate_pose(base_points, dist, res, ox, oy, sigma=0.08):
 
 class CruiseWorker(threading.Thread):
     def __init__(self, plan, dwell, strafe_ids, strafe_speed, map_frame,
-                 log_fn, on_status, pose_get=None, base_frame='base_footprint'):
+                 log_fn, on_status, pose_get=None, base_frame='base_footprint',
+                 run_timer=None):
         super(CruiseWorker, self).__init__(daemon=True)
         self.plan = plan
         self.dwell = dwell
@@ -172,6 +222,9 @@ class CruiseWorker(threading.Thread):
         self.log_fn = log_fn
         self.on_status = on_status
         self._pose_get = pose_get
+        self.run_timer = run_timer if run_timer is not None else CruiseTimer()
+        self._timing_lock = threading.Lock()
+        self._timing_reported = False
 
         self._resume = threading.Event()
         self._resume.set()
@@ -190,11 +243,13 @@ class CruiseWorker(threading.Thread):
 
     # ---------- 外部控制 ----------
     def pause(self):
+        self.run_timer.pause()
         self._resume.clear()
         self._set_status('已暂停')
         self.log('== 暂停 ==')
 
     def resume(self):
+        self.run_timer.resume()
         self._resume.set()
         self._set_status('运行中')
         self.log('== 继续 ==')
@@ -526,7 +581,26 @@ class CruiseWorker(threading.Thread):
                 return
             time.sleep(0.05)
 
+    def finish_timing(self):
+        """每轮只记录一次；窗口关闭时也可调用，确保计时落盘。"""
+        with self._timing_lock:
+            if self._timing_reported:
+                return
+            timing = self.run_timer.finish()
+            self.log('计时汇总：总耗时 %s（含暂停），暂停 %s，执行耗时 %s（不含暂停）'
+                     % (format_duration(timing['total']),
+                        format_duration(timing['paused']),
+                        format_duration(timing['active'])))
+            self._timing_reported = True
+
     def run(self):
+        try:
+            self._run_plan()
+        finally:
+            # 正常结束、终止、启动失败或异常退出都停表；不改变运动处理。
+            self.finish_timing()
+
+    def _run_plan(self):
         import actionlib
         import rospy
         import tf
@@ -558,7 +632,6 @@ class CruiseWorker(threading.Thread):
                          % self.base_frame)
                 return
 
-        started_run = time.monotonic()
         self._set_status('运行中')
         prev = None
         try:
@@ -693,7 +766,7 @@ class App(object):
         self.log_queue = queue.Queue()
         self.pose_tracker = None
         self.current_id = None
-        self.run_start = None
+        self.run_timer = None
 
         self.log_path = os.path.join(
             os.path.dirname(DEFAULT_POINTS),
@@ -919,6 +992,10 @@ class App(object):
         self.log_queue.put(text)
 
     def _drain_log(self):
+        self._flush_log_queue()
+        self.root.after(100, self._drain_log)
+
+    def _flush_log_queue(self):
         while True:
             try:
                 text = self.log_queue.get_nowait()
@@ -931,7 +1008,6 @@ class App(object):
             self.log_box.insert('end', line + '\n')
             self.log_box.see('end')
             self.log_box.configure(state='disabled')
-        self.root.after(100, self._drain_log)
 
     def _poll(self):
         pose = self.pose_tracker.get() if self.pose_tracker else None
@@ -947,8 +1023,8 @@ class App(object):
                 self.tree.selection_set(str(idx))
                 self.tree.see(str(idx))
         self._draw_pose()
-        if self.run_start is not None:
-            elapsed = time.monotonic() - self.run_start
+        if self.run_timer is not None:
+            elapsed = self.run_timer.snapshot()['total']
             self.root.title('巡航调试  用时 %02d:%02d'
                             % (int(elapsed) // 60, int(elapsed) % 60))
         # 一次巡航结束后重新放开“开始”，不用重启 GUI
@@ -975,13 +1051,14 @@ class App(object):
         dwell = float(self.dwell_var.get())
         speed = max(0.02, min(0.10, float(self.speed_var.get())))
         self.speed_var.set('%.2f' % speed)
-        self.run_start = time.monotonic()
+        self.run_timer = CruiseTimer()
         self.log_file.write('\n===== 开始巡航 %s =====\n'
                             % datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         self.worker = CruiseWorker(self.plan, dwell, self._strafe_ids(), speed,
                                    self.args.map_frame, self._log, lambda: None,
                                    pose_get=self.pose_tracker.get,
-                                   base_frame=self.args.base_frame)
+                                   base_frame=self.args.base_frame,
+                                   run_timer=self.run_timer)
         self.worker.start()
         self.start_btn.configure(state='disabled')
         self.pause_btn.configure(state='normal')
@@ -1107,6 +1184,8 @@ class App(object):
     def on_close(self):
         if self.worker is not None:
             self.worker.stop()
+            self.worker.finish_timing()
+        self._flush_log_queue()
         try:
             import rospy
             rospy.signal_shutdown('gui closed')
