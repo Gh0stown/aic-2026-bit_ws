@@ -216,7 +216,7 @@ class CruiseWorker(threading.Thread):
                  log_fn, on_status, pose_get=None, base_frame='base_footprint',
                  run_timer=None, drive_long=DRIVE_SPEED_LONG,
                  drive_mid=DRIVE_SPEED_MID, drive_short=DRIVE_SPEED_SHORT,
-                 rot_speed=1.00):
+                 rot_speed=1.00, reverse_speed=0.18):
         super(CruiseWorker, self).__init__(daemon=True)
         self.plan = plan
         self.dwell = dwell
@@ -226,6 +226,7 @@ class CruiseWorker(threading.Thread):
         self.drive_mid = max(0.10, min(0.60, float(drive_mid)))
         self.drive_short = max(0.10, min(0.60, float(drive_short)))
         self.rot_speed = max(0.20, min(1.00, float(rot_speed)))
+        self.reverse_speed = max(0.05, min(0.30, float(reverse_speed)))
         self.map_frame = map_frame
         self.base_frame = base_frame
         self.log_fn = log_fn
@@ -662,7 +663,7 @@ class CruiseWorker(threading.Thread):
                     if prev is not None:
                         self.log('  倒车前先对齐 %s (%.3f, %.3f)'
                                  % (prev['id'], prev['x'], prev['y']))
-                        self._align_to(prev['x'], prev['y'], tol=0.03, speed=0.06,
+                        self._align_to(prev['x'], prev['y'], tol=0.03, speed=0.12,
                                        timeout=10.0, hold_yaw=prev['yaw'])
                         if self._stop_evt.is_set():
                             break
@@ -672,7 +673,8 @@ class CruiseWorker(threading.Thread):
                         break
                     self.log('  倒车到 19 (%.3f, %.3f)' % (step['x'], step['y']))
                     arrived = self._align_to(step['x'], step['y'], tol=0.02,
-                                             speed=0.08, timeout=20.0, hold_yaw=0.0)
+                                             speed=self.reverse_speed,
+                                             timeout=15.0, hold_yaw=0.0)
                 elif via_strafe:
                     self._rotate_to(step['yaw'], '平移前朝向')
                     if self._stop_evt.is_set():
@@ -882,6 +884,10 @@ class App(object):
         self.rot_speed_var = tk.StringVar(value='1.00')
         ttk.Spinbox(speed_frame, from_=0.20, to=1.00, increment=0.05, width=5,
                     textvariable=self.rot_speed_var).pack(side='left', padx=(2, 12))
+        ttk.Label(speed_frame, text='倒车 m/s').pack(side='left')
+        self.reverse_speed_var = tk.StringVar(value='0.18')
+        ttk.Spinbox(speed_frame, from_=0.05, to=0.30, increment=0.01, width=5,
+                    textvariable=self.reverse_speed_var).pack(side='left', padx=(2, 12))
         ttk.Label(speed_frame, text='（点击“开始”时生效）').pack(side='left')
 
         body = ttk.Frame(self.root, padding=6)
@@ -1105,8 +1111,10 @@ class App(object):
         mid_speed = max(0.10, min(0.60, float(self.mid_speed_var.get())))
         short_speed = max(0.10, min(0.60, float(self.short_speed_var.get())))
         rot_speed = max(0.20, min(1.00, float(self.rot_speed_var.get())))
+        reverse_speed = max(0.05, min(0.30, float(self.reverse_speed_var.get())))
         for var, val in ((self.long_speed_var, long_speed), (self.mid_speed_var, mid_speed),
-                         (self.short_speed_var, short_speed), (self.rot_speed_var, rot_speed)):
+                         (self.short_speed_var, short_speed), (self.rot_speed_var, rot_speed),
+                         (self.reverse_speed_var, reverse_speed)):
             var.set('%.2f' % val)
         self.run_timer = CruiseTimer()
         self.log_file.write('\n===== 开始巡航 %s =====\n'
@@ -1117,7 +1125,8 @@ class App(object):
                                    base_frame=self.args.base_frame,
                                    run_timer=self.run_timer,
                                    drive_long=long_speed, drive_mid=mid_speed,
-                                   drive_short=short_speed, rot_speed=rot_speed)
+                                   drive_short=short_speed, rot_speed=rot_speed,
+                                   reverse_speed=reverse_speed)
         self.worker.start()
         self.start_btn.configure(state='disabled')
         self.pause_btn.configure(state='normal')
