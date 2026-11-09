@@ -123,7 +123,7 @@ rosrun photo_capture capture_photos.py --mode detect --no-gui --model fire.pt
     把车放到开阔区域，或只用普通拍照模式。
 - 开始前会检查 `/cmd_vel` 订阅者，检测到遥控/导航 publisher 会阻止启动（`--force` 可强制）；
 - 运动前 3 秒倒计时；窗口上有「停止」按钮，`Esc`、`Ctrl+C` 也会先停车；
-- 低速（默认 0.06 m/s）、短步长、每步归零，退出/异常都会发零速度；
+- 速度与巡航脚本一致（默认 0.15 m/s，上限 0.15）、短步长、每步归零，退出/异常都会发零速度；
 - 有 `/scan` 时，平移前检查运动侧最近障碍，小于 `--scan-clearance` 会拒绝平移。
 - **手动录制**不控制底盘，只按帧率录画面；用你自己的遥控/节点移动。
   注意：现有 `mbot_teleop` 键盘遥控的 `linear.y` 固定为 0，**不支持横移**；
@@ -137,7 +137,7 @@ rosrun photo_capture capture_photos.py --mode detect --no-gui --model fire.pt
 4. 点「开始扫描」，等倒计时结束后车会横移、停稳、拍照，重复到设定帧数；
 5. 自动拼接，显示全景缩略图。
 
-默认参数：向左 1.0m、5 帧、每步 0.25m、速度 0.06 m/s。界面会显示实际步长。
+默认参数：向左 1.0m、5 帧、每步 0.25m、速度 0.15 m/s。界面会显示实际步长。
 相机默认按 1280×720 采集；如果要最大细节可加
 `--width 1920 --height 1080`（1080 在全屏放大时会更柔）。
 
@@ -186,7 +186,7 @@ rosrun photo_capture capture_photos.py --mode detect --no-gui --model fire.pt
 # 自动平移：需要 newt.py；--yes 跳过确认
 rosrun photo_capture capture_photos.py --no-gui --mode scan --scan-mode strafe \
   --scan-distance 1.0 --scan-frames 5 --scan-direction left \
-  --scan-speed 0.06 --scan-label 大厅 --yes
+  --scan-speed 0.15 --scan-label 大厅 --yes
 
 # 拼接后顺便用 YOLO 检测全景
 rosrun photo_capture capture_photos.py --no-gui --mode scan --scan-mode strafe \
@@ -315,7 +315,7 @@ rosrun photo_capture capture_photos.py --no-gui --mode gauge \
 | `--scan-frames` | `5` | 平移扫描总帧数 |
 | `--scan-distance` | `1.0` | 平移总距离（米） |
 | `--scan-direction` | `left` | `left` / `right` |
-| `--scan-speed` | `0.06` | 平移速度 m/s（上限 0.10） |
+| `--scan-speed` | `0.15` | 平移速度 m/s（上限 0.15，与巡航脚本一致） |
 | `--scan-settle` | `0.5` | 每步停稳时间（秒） |
 | `--scan-fps` | `3.0` | 手动录制抽帧帧率 |
 | `--scan-label` | 时间戳 | 区域名称 |

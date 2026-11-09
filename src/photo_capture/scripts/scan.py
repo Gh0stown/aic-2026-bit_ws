@@ -49,7 +49,7 @@ class ScanSettings:
     frames: int = 5
     distance_m: float = 1.0
     direction: str = "left"       # left / right
-    speed: float = 0.06           # m/s
+    speed: float = 0.15           # m/s，与巡航脚本一致
     settle: float = 0.5
     label: str = ""
     auto_stitch: bool = True
@@ -64,7 +64,7 @@ class ScanSettings:
             raise ValueError("扫描方式必须是 strafe 或 manual")
         self.frames = max(2, min(30, int(self.frames)))
         self.distance_m = max(0.02, min(5.0, float(self.distance_m)))
-        self.speed = max(0.02, min(0.10, float(self.speed)))
+        self.speed = max(0.02, min(0.15, float(self.speed)))
         self.settle = max(0.1, min(3.0, float(self.settle)))
         self.direction = "right" if str(self.direction).lower() == "right" else "left"
         self.fps = max(1.0, min(10.0, float(self.fps)))

@@ -237,7 +237,7 @@ class ChassisController:
                stop_event=None, clearance: Optional[float] = None,
                feedback: Optional[str] = None) -> dict:
         distance = max(0.01, min(5.0, float(distance)))
-        speed = max(0.02, min(0.10, float(speed)))
+        speed = max(0.02, min(0.15, float(speed)))
         sign = 1.0 if direction != "right" else -1.0
         mode = feedback or self.feedback
         clearance = self.clearance if clearance is None else clearance
