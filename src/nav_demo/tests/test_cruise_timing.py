@@ -132,6 +132,7 @@ class IntegrationTests(unittest.TestCase):
         app.calibrating = False
         app.cal_btn = {'state': 'normal'}
         app._draw_pose = Mock()
+        app._update_dashboard = Mock()  # 计时回归不构建只读状态面板。
         app._poll()  # 初次打开，未开始计时不能报 AttributeError。
         app.root.title.assert_not_called()
         app.run_timer = CruiseTimer(clock)
@@ -149,6 +150,13 @@ class IntegrationTests(unittest.TestCase):
         app._draw_highlight = Mock()
         app.dwell_var = Mock(get=lambda: '1')
         app.speed_var = Mock(get=lambda: '0.1')
+        app.teleop_keys = {}
+        app._teleop_zero = Mock()  # 禁止测试触及实际底盘发布器。
+        app._teleop_active = False
+        for name, value in (('long_speed_var', '0.60'), ('mid_speed_var', '0.60'),
+                            ('short_speed_var', '0.60'), ('rot_speed_var', '1.00'),
+                            ('reverse_speed_var', '0.30')):
+            setattr(app, name, Mock(get=Mock(return_value=value)))
         app._strafe_ids = lambda: {14, 15, 16, 17, 18}
         app.args = types.SimpleNamespace(map_frame='map', base_frame='base_footprint')
         app.pose_tracker = Mock()
@@ -171,6 +179,9 @@ class IntegrationTests(unittest.TestCase):
         app.log_queue = queue.Queue()
         app.worker = self.make_worker(clock, app.log_queue.put)
         app.worker.stop = Mock()  # 不执行任何 ROS 或底盘调用。
+        app.teleop_keys = {}
+        app._teleop_zero = Mock()
+        app._teleop_active = False
         app.root = Mock()
         app.log_box = Mock()
         app.log_file = Mock()

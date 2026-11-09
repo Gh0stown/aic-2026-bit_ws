@@ -3,10 +3,10 @@
 """巡航图形界面：选路线、看地图、开始/暂停/继续/终止/记录现场。
 
 界面：
-    顶部  路线选择、停留时间、平移速度、载入计划
-    左侧  场地地图 + 点位 + 当前目标高亮 + 实时位姿箭头
-    右侧  点位执行列表（序号/名称/到点方式/识别任务）+ 日志
-    底部  开始 / 暂停 / 继续 / 终止 / 记录现场
+    顶部  运行状态、计时、路线计划、可折叠的高级速度设置
+    左侧  自适应场地地图 + 点位 + 当前目标高亮 + 实时位姿箭头
+    右侧  分组控制台 + 点位执行列表 + 可调比例的日志
+    地图下方  位姿与暂停键盘操作提示
 
 暂停：取消当前 move_base 目标、停止平移、持续发零速度；
 继续：从当前步骤重新开始，不跳点；
@@ -829,119 +829,294 @@ class App(object):
     # ---------- 界面 ----------
     def _setup_fonts(self):
         import tkinter.font as tkfont
+        from tkinter import ttk
+
         families = set(tkfont.families())
+        family = tkfont.nametofont('TkDefaultFont').actual('family')
         for name in ('Noto Sans CJK SC', 'WenQuanYi Micro Hei', 'Noto Sans CJK JP'):
             if name in families:
-                for key in ('TkDefaultFont', 'TkTextFont', 'TkMenuFont', 'TkHeadingFont'):
-                    tkfont.nametofont(key).configure(family=name, size=10)
+                family = name
                 break
+        for key in ('TkDefaultFont', 'TkTextFont', 'TkMenuFont', 'TkHeadingFont'):
+            tkfont.nametofont(key).configure(family=family, size=10)
+        self.ui_font = family
+        self.colors = {'bg': '#edf2f6', 'card': '#ffffff', 'ink': '#203247',
+                       'muted': '#687b8e', 'line': '#dbe4ec', 'accent': '#087f8c',
+                       'navy': '#172b40', 'danger': '#b83d4c'}
+        c = self.colors
+        style = ttk.Style(self.root)
+        # clam 在 Linux 下也支持按钮背景、内边距和清晰的禁用状态。
+        style.theme_use('clam')
+        style.configure('.', font=(family, 10), background=c['bg'], foreground=c['ink'])
+        style.configure('TFrame', background=c['bg'])
+        style.configure('Card.TFrame', background=c['card'])
+        style.configure('TLabel', background=c['card'], foreground=c['ink'])
+        style.configure('Muted.TLabel', foreground=c['muted'])
+        style.configure('Section.TLabel', font=(family, 11, 'bold'))
+        style.configure('TButton', padding=(10, 4), background='#f1f5f9',
+                        bordercolor=c['line'], focuscolor=c['accent'])
+        style.map('TButton', background=[('active', '#e3edf4')],
+                  foreground=[('disabled', '#9ba9b6')])
+        for name, normal, hover in (('Accent', c['accent'], '#066b77'),
+                                    ('Danger', c['danger'], '#9f2f3d')):
+            style.configure(name + '.TButton', background=normal, foreground='white',
+                            bordercolor=normal, font=(family, 10, 'bold'))
+            style.map(name + '.TButton',
+                      background=[('disabled', '#e6ecf1'), ('active', hover)],
+                      foreground=[('disabled', '#9ba9b6'), ('!disabled', 'white')],
+                      bordercolor=[('disabled', c['line'])])
+        style.configure('TEntry', padding=5, fieldbackground='white',
+                        bordercolor=c['line'])
+        style.configure('TCombobox', padding=5, bordercolor=c['line'])
+        style.map('TCombobox', fieldbackground=[('readonly', 'white')])
+        style.configure('TSpinbox', padding=5, fieldbackground='white',
+                        bordercolor=c['line'], arrowsize=12)
+        style.configure('TCheckbutton', background='white', padding=3)
+        style.map('TCheckbutton', background=[('active', 'white')])
+        style.configure('Treeview', background='white', fieldbackground='white',
+                        rowheight=32, borderwidth=0)
+        style.configure('Treeview.Heading', background='#edf3f7',
+                        foreground=c['muted'], font=(family, 9, 'bold'), padding=(6, 7))
+        style.map('Treeview', background=[('selected', '#d8eeef')],
+                  foreground=[('selected', '#075b65')])
+        style.configure('TSeparator', background=c['line'])
+        style.configure('Horizontal.TProgressbar', background=c['accent'],
+                        troughcolor='#e7eef3', borderwidth=0, thickness=4)
 
     def _build_ui(self):
         import tkinter as tk
         from tkinter import scrolledtext, ttk
 
-        self.root.title('巡航调试')
-        self.root.geometry('1120x720')
+        c = self.colors
+        self.root.title('巡航调试 · 控制台')
+        width = min(1280, self.root.winfo_screenwidth() - 60)
+        height = min(900, self.root.winfo_screenheight() - 90)
+        self.root.geometry('%dx%d' % (width, height))
+        self.root.minsize(1020, 700)
+        self.root.configure(background=c['bg'])
 
-        top = ttk.Frame(self.root, padding=6)
-        top.pack(fill='x')
-        ttk.Label(top, text='路线').pack(side='left')
+        header = tk.Frame(self.root, background=c['navy'], padx=20, pady=12)
+        header.pack(fill='x')
+        tk.Label(header, text='巡航调试', background=c['navy'], foreground='white',
+                 font=(self.ui_font, 19, 'bold')).pack(side='left')
+        tk.Label(header, text=' /  NAVIGATION CONSOLE', background=c['navy'],
+                 foreground='#9fb5c9', font=(self.ui_font, 9)).pack(side='left', padx=12)
+        self.status_var = tk.StringVar(value='待开始')
+        self.status_badge = tk.Label(header, textvariable=self.status_var,
+                                    background='#294357', foreground='#dbe8f2',
+                                    padx=12, pady=4, font=(self.ui_font, 10, 'bold'))
+        self.status_badge.pack(side='right')
+        self.elapsed_var = tk.StringVar(value='00:00')
+        tk.Label(header, textvariable=self.elapsed_var, background=c['navy'],
+                 foreground='white', font=('DejaVu Sans Mono', 18, 'bold')).pack(
+                     side='right', padx=(8, 18))
+        tk.Label(header, text='本轮用时', background=c['navy'],
+                 foreground='#9fb5c9').pack(side='right')
+
+        plan_card = ttk.Frame(self.root, style='Card.TFrame', padding=(16, 8))
+        plan_card.pack(fill='x', padx=14, pady=(12, 0))
+        plan_card.columnconfigure(1, weight=1)
+        plan_header = ttk.Frame(plan_card, style='Card.TFrame')
+        plan_header.grid(row=0, column=0, columnspan=6, sticky='ew', pady=(0, 6))
+        ttk.Label(plan_header, text='路线计划', style='Section.TLabel').pack(side='left')
+        ttk.Label(plan_header, text='顺序留空使用预设路线 · 7p = 路过，不识别 · 速度下次开始生效',
+                  style='Muted.TLabel').pack(side='left', padx=16)
+        self.advanced_btn = ttk.Button(plan_header, text='▸ 高级速度设置',
+                                       command=self._toggle_advanced)
+        self.advanced_btn.pack(side='right')
+
+        for col, text in enumerate(('路线', '执行顺序（逗号分隔）', '停留 / s', '平移 / m/s')):
+            ttk.Label(plan_card, text=text, style='Muted.TLabel').grid(
+                row=1, column=col, sticky='w', padx=(0, 12))
         self.route_var = tk.StringVar()
-        self.route_combo = ttk.Combobox(top, textvariable=self.route_var,
-                                        values=list(self.routes.keys()), width=10,
+        self.route_combo = ttk.Combobox(plan_card, textvariable=self.route_var,
+                                        values=list(self.routes.keys()), width=12,
                                         state='readonly')
-        self.route_combo.pack(side='left', padx=(4, 12))
+        self.route_combo.grid(row=2, column=0, sticky='ew', padx=(0, 12))
         self.route_combo.bind('<<ComboboxSelected>>', lambda e: self._refresh_map())
-
-        ttk.Label(top, text='顺序（可空）').pack(side='left')
         self.order_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.order_var, width=30).pack(side='left', padx=(4, 12))
-
-        ttk.Label(top, text='停留 s').pack(side='left')
+        ttk.Entry(plan_card, textvariable=self.order_var, width=24).grid(
+            row=2, column=1, sticky='ew', padx=(0, 12))
         self.dwell_var = tk.StringVar(value=str(self.args.dwell))
-        ttk.Spinbox(top, from_=0.5, to=10.0, increment=0.5, width=5,
-                    textvariable=self.dwell_var).pack(side='left', padx=(4, 12))
-
-        ttk.Label(top, text='平移 m/s').pack(side='left')
+        ttk.Spinbox(plan_card, from_=0.5, to=10.0, increment=0.5, width=6,
+                    textvariable=self.dwell_var).grid(row=2, column=2, padx=(0, 12))
         self.speed_var = tk.StringVar(value=str(self.args.strafe_speed))
-        ttk.Spinbox(top, from_=0.02, to=0.15, increment=0.01, width=5,
-                    textvariable=self.speed_var).pack(side='left', padx=(4, 12))
-
+        ttk.Spinbox(plan_card, from_=0.02, to=0.15, increment=0.01, width=6,
+                    textvariable=self.speed_var).grid(row=2, column=3, padx=(0, 12))
         self.skip0_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(top, text='跳过0号点', variable=self.skip0_var,
-                        command=self._reload_plan).pack(side='left', padx=(0, 10))
-        ttk.Button(top, text='载入计划', command=self._reload_plan).pack(side='left')
+        ttk.Checkbutton(plan_card, text='跳过 0 号点', variable=self.skip0_var,
+                        command=self._reload_plan).grid(row=2, column=4, padx=(0, 12))
+        ttk.Button(plan_card, text='载入计划', command=self._reload_plan).grid(
+            row=2, column=5, sticky='ew')
 
-        speed_frame = ttk.Frame(self.root, padding=(6, 0, 6, 4))
-        speed_frame.pack(fill='x')
-        ttk.Label(speed_frame, text='直线速度 长').pack(side='left')
+        self.advanced_frame = ttk.Frame(plan_card, style='Card.TFrame')
+        self.advanced_frame.grid(row=3, column=0, columnspan=6, sticky='ew', pady=(6, 0))
         self.long_speed_var = tk.StringVar(value='%.2f' % DRIVE_SPEED_LONG)
-        ttk.Spinbox(speed_frame, from_=0.10, to=0.60, increment=0.01, width=5,
-                    textvariable=self.long_speed_var).pack(side='left', padx=(2, 8))
-        ttk.Label(speed_frame, text='中').pack(side='left')
         self.mid_speed_var = tk.StringVar(value='%.2f' % DRIVE_SPEED_MID)
-        ttk.Spinbox(speed_frame, from_=0.10, to=0.60, increment=0.01, width=5,
-                    textvariable=self.mid_speed_var).pack(side='left', padx=(2, 8))
-        ttk.Label(speed_frame, text='短').pack(side='left')
         self.short_speed_var = tk.StringVar(value='%.2f' % DRIVE_SPEED_SHORT)
-        ttk.Spinbox(speed_frame, from_=0.10, to=0.60, increment=0.01, width=5,
-                    textvariable=self.short_speed_var).pack(side='left', padx=(2, 12))
-        ttk.Label(speed_frame, text='转向 rad/s').pack(side='left')
         self.rot_speed_var = tk.StringVar(value='1.00')
-        ttk.Spinbox(speed_frame, from_=0.20, to=1.00, increment=0.05, width=5,
-                    textvariable=self.rot_speed_var).pack(side='left', padx=(2, 12))
-        ttk.Label(speed_frame, text='倒车 m/s').pack(side='left')
         self.reverse_speed_var = tk.StringVar(value='0.30')
-        ttk.Spinbox(speed_frame, from_=0.05, to=0.30, increment=0.01, width=5,
-                    textvariable=self.reverse_speed_var).pack(side='left', padx=(2, 12))
-        ttk.Label(speed_frame, text='（点击“开始”时生效）').pack(side='left')
+        speed_fields = (
+            ('长直线 / m/s', self.long_speed_var, 0.10, 0.60, 0.01),
+            ('中段 / m/s', self.mid_speed_var, 0.10, 0.60, 0.01),
+            ('短段 / m/s', self.short_speed_var, 0.10, 0.60, 0.01),
+            ('转向 / rad/s', self.rot_speed_var, 0.20, 1.00, 0.05),
+            ('倒车 / m/s', self.reverse_speed_var, 0.05, 0.30, 0.01))
+        for col, (text, var, low, high, increment) in enumerate(speed_fields):
+            cell = ttk.Frame(self.advanced_frame, style='Card.TFrame')
+            cell.grid(row=0, column=col, sticky='ew', padx=(0, 14))
+            self.advanced_frame.columnconfigure(col, weight=1)
+            ttk.Label(cell, text=text, style='Muted.TLabel').pack(side='left', padx=(0, 6))
+            ttk.Spinbox(cell, from_=low, to=high, increment=increment, width=5,
+                        textvariable=var).pack(side='left')
+        self.advanced_frame.grid_remove()
 
-        body = ttk.Frame(self.root, padding=6)
-        body.pack(fill='both', expand=True)
-
-        left = ttk.Frame(body)
-        left.pack(side='left', fill='both')
-        self.canvas = tk.Canvas(left, width=MAP_W, height=MAP_H,
-                                highlightthickness=1, highlightbackground='#666')
-        self.canvas.pack()
-        self.pose_var = tk.StringVar(value='位姿：等待 map -> base_footprint')
-        ttk.Label(left, textvariable=self.pose_var).pack(anchor='w', pady=(4, 0))
-        ttk.Label(left, text='暂停后键盘：W/S 前后  A/D 平移  Q/E 旋转  空格停',
-                  foreground='#666').pack(anchor='w')
-
+        body = ttk.Panedwindow(self.root, orient='horizontal')
+        body.pack(fill='both', expand=True, padx=14, pady=12)
+        left = ttk.Frame(body, style='Card.TFrame', padding=14)
         right = ttk.Frame(body)
-        right.pack(side='left', fill='both', expand=True, padx=(8, 0))
+        body.add(left, weight=6)
+        body.add(right, weight=5)
+        # 给右侧足够的初始宽度；之后可拖动分隔线改变地图/控制台比例。
+        self.root.after_idle(lambda: body.sashpos(0, int(width * 0.51)))
 
+        map_header = ttk.Frame(left, style='Card.TFrame')
+        map_header.pack(fill='x', pady=(0, 10))
+        ttk.Label(map_header, text='场地地图', style='Section.TLabel').pack(side='left')
+        ttk.Label(map_header, text='● 点位   ◯ 当前目标   ▲ 机器人',
+                  style='Muted.TLabel').pack(side='right')
+        self.canvas = tk.Canvas(left, width=MAP_W, height=MAP_H,
+                                background='#f4f7fa', highlightthickness=0)
+        self.canvas.bind('<Configure>', self._on_map_resize)
+        self.canvas.bind('<Button-1>', lambda e: self.canvas.focus_set())
+        # 先预留底部提示区域，再让地图占用剩余空间，小窗口也不会裁掉安全提示。
+        map_footer = ttk.Frame(left, style='Card.TFrame')
+        map_footer.pack(side='bottom', fill='x')
+        self.pose_var = tk.StringVar(value='位姿：等待 map → base_footprint')
+        self.pose_label = ttk.Label(map_footer, textvariable=self.pose_var,
+                                    font=('DejaVu Sans Mono', 10))
+        self.pose_label.pack(anchor='w', pady=(10, 6))
+        ttk.Separator(map_footer).pack(fill='x', pady=(0, 8))
+        self.teleop_hint_var = tk.StringVar(value='键盘未开放 · 仅在“已暂停”时可用')
+        self.teleop_hint = ttk.Label(map_footer, textvariable=self.teleop_hint_var,
+                                     style='Muted.TLabel')
+        self.teleop_hint.pack(anchor='w')
+        ttk.Label(map_footer, text='W / S 前后    A / D 平移    Q / E 旋转    空格 停止',
+                  style='Muted.TLabel', font=(self.ui_font, 9)).pack(anchor='w', pady=(2, 0))
+        ttk.Label(map_footer, text='输入框聚焦时不接管键盘 · 点击地图回到操作区',
+                  style='Muted.TLabel', font=(self.ui_font, 9)).pack(anchor='w', pady=(2, 0))
+        self.canvas.pack(fill='both', expand=True)
+
+        control = ttk.Frame(right, style='Card.TFrame', padding=(14, 8))
+        control.pack(fill='x', pady=(0, 10))
+        control_header = ttk.Frame(control, style='Card.TFrame')
+        control_header.pack(fill='x')
+        ttk.Label(control_header, text='运行控制', style='Section.TLabel').pack(side='left')
+        self.position_var = tk.StringVar(value='尚未载入计划')
+        ttk.Label(control_header, textvariable=self.position_var,
+                  style='Muted.TLabel').pack(side='right')
+        self.step_var = tk.StringVar(value='载入计划后，点击开始巡航')
+        self.step_label = ttk.Label(control, textvariable=self.step_var,
+                                    style='Muted.TLabel', wraplength=420)
+        self.step_label.pack(fill='x', pady=(3, 5))
+        control.bind('<Configure>', lambda e: self.step_label.configure(
+            wraplength=max(160, e.width - 28)))
+        self.progress = ttk.Progressbar(control, mode='determinate', maximum=1)
+        self.progress.pack(fill='x', pady=(0, 10))
+        actions = ttk.Frame(control, style='Card.TFrame')
+        actions.pack(fill='x')
+        self.start_btn = ttk.Button(actions, text='开始巡航', command=self.start,
+                                     style='Accent.TButton')
+        self.pause_btn = ttk.Button(actions, text='暂停', command=self.pause, state='disabled')
+        self.resume_btn = ttk.Button(actions, text='继续', command=self.resume, state='disabled')
+        self.stop_btn = ttk.Button(actions, text='终止', command=self.stop, state='disabled',
+                                    style='Danger.TButton')
+        for col, btn in enumerate((self.start_btn, self.pause_btn, self.resume_btn, self.stop_btn)):
+            btn.grid(row=0, column=col, sticky='ew', padx=(0 if col == 0 else 6, 0))
+            actions.columnconfigure(col, weight=1, uniform='actions')
+        tools = ttk.Frame(control, style='Card.TFrame')
+        tools.pack(fill='x', pady=(8, 0))
+        ttk.Label(tools, text='现场工具', style='Muted.TLabel').pack(side='left', padx=(0, 8))
+        ttk.Button(tools, text='记录现场', command=self.snapshot).pack(side='left', expand=True, fill='x')
+        ttk.Button(tools, text='记录点位', command=self.record_point).pack(
+            side='left', expand=True, fill='x', padx=6)
+        self.cal_btn = ttk.Button(tools, text='扫描校准', command=self.calibrate)
+        self.cal_btn.pack(side='left', expand=True, fill='x')
+
+        # 为上下两块设置最小高度，避免小窗口展开高级设置后日志被挤没。
+        details = tk.PanedWindow(right, orient='vertical', sashwidth=7,
+                                 background=c['bg'], borderwidth=0)
+        details.pack(fill='both', expand=True)
+        list_card = ttk.Frame(details, style='Card.TFrame', padding=(12, 10))
+        log_card = ttk.Frame(details, style='Card.TFrame', padding=(12, 10))
+        details.add(list_card, minsize=145, stretch='always')
+        details.add(log_card, minsize=100, stretch='always')
+        details.bind('<Configure>', lambda e: self._fit_detail_panes(details))
+        list_header = ttk.Frame(list_card, style='Card.TFrame')
+        list_header.pack(fill='x', pady=(0, 8))
+        ttk.Label(list_header, text='点位执行列表', style='Section.TLabel').pack(side='left')
+        self.plan_count_var = tk.StringVar(value='0 个点位')
+        ttk.Label(list_header, textvariable=self.plan_count_var,
+                  style='Muted.TLabel').pack(side='right')
+        table = ttk.Frame(list_card, style='Card.TFrame')
+        table.pack(fill='both', expand=True)
+        table.rowconfigure(0, weight=1)
+        table.columnconfigure(0, weight=1)
         cols = ('id', 'name', 'mode', 'tasks')
-        self.tree = ttk.Treeview(right, columns=cols, show='headings', height=9)
-        for col, text, width, anchor in (
-                ('id', 'ID', 40, 'center'),
-                ('name', '点位', 180, 'w'),
-                ('mode', '到点方式', 70, 'center'),
-                ('tasks', '识别朝向', 220, 'w')):
+        self.tree = ttk.Treeview(table, columns=cols, show='headings', height=6)
+        for col, text, col_width, minimum, anchor in (
+                ('id', 'ID', 40, 36, 'center'),
+                ('name', '点位', 130, 100, 'w'),
+                ('mode', '到点方式', 88, 86, 'center'),
+                ('tasks', '识别朝向', 175, 140, 'w')):
             self.tree.heading(col, text=text)
-            self.tree.column(col, width=width, anchor=anchor)
-        self.tree.pack(fill='x')
-
-        self.log_box = scrolledtext.ScrolledText(right, height=14, state='disabled')
-        self.log_box.pack(fill='both', expand=True, pady=(6, 0))
-
-        bottom = ttk.Frame(self.root, padding=6)
-        bottom.pack(fill='x')
-        self.start_btn = ttk.Button(bottom, text='开始', command=self.start)
-        self.pause_btn = ttk.Button(bottom, text='暂停', command=self.pause, state='disabled')
-        self.resume_btn = ttk.Button(bottom, text='继续', command=self.resume, state='disabled')
-        self.stop_btn = ttk.Button(bottom, text='终止', command=self.stop, state='disabled')
-        snap_btn = ttk.Button(bottom, text='记录现场', command=self.snapshot)
-        rec_btn = ttk.Button(bottom, text='记录点位', command=self.record_point)
-        self.cal_btn = ttk.Button(bottom, text='扫描校准', command=self.calibrate)
-        for i, b in enumerate((self.start_btn, self.pause_btn, self.resume_btn,
-                               self.stop_btn, snap_btn, rec_btn, self.cal_btn)):
-            b.grid(row=0, column=i, padx=4, sticky='ew')
-            bottom.columnconfigure(i, weight=1)
+            self.tree.column(col, width=col_width, minwidth=minimum, anchor=anchor,
+                             stretch=col in ('name', 'tasks'))
+        self.tree.grid(row=0, column=0, sticky='nsew')
+        yscroll = ttk.Scrollbar(table, orient='vertical', command=self.tree.yview)
+        yscroll.grid(row=0, column=1, sticky='ns')
+        xscroll = ttk.Scrollbar(table, orient='horizontal', command=self.tree.xview)
+        xscroll.grid(row=1, column=0, sticky='ew')
+        self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.tree.tag_configure('even', background='#f4f8fb')
+        self.tree.tag_configure('pass', foreground='#76879a')
+        ttk.Label(log_card, text='运行日志', style='Section.TLabel').pack(anchor='w', pady=(0, 8))
+        self.log_box = scrolledtext.ScrolledText(
+            log_card, height=5, state='disabled', wrap='word', relief='flat', borderwidth=0,
+            background='#172b40', foreground='#d4e2ef', insertbackground='white',
+            selectbackground='#356071', padx=10, pady=8, font=(self.ui_font, 9))
+        self.log_box.pack(fill='both', expand=True)
+        self.log_box.tag_configure('record', foreground='#83dfc4')
+        self.log_box.tag_configure('warning', foreground='#ffc38b')
 
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
         self.root.bind_all('<KeyPress>', self._on_key)
+
+    def _fit_detail_panes(self, panes):
+        # Tk 在整体收缩时可能暂时突破 minsize；仅在越界时修正，保留手动拖动比例。
+        height = panes.winfo_height()
+        if height >= 252:
+            x, y = panes.sash_coord(0)
+            panes.sash_place(0, x, max(145, min(y, height - 107)))
+
+    def _toggle_advanced(self):
+        if self.advanced_frame.winfo_manager():
+            self.advanced_frame.grid_remove()
+            self.advanced_btn.configure(text='▸ 高级速度设置')
+        else:
+            self.advanced_frame.grid()
+            self.advanced_btn.configure(text='▾ 收起速度设置')
+
+    def _on_map_resize(self, _event):
+        # 合并连续的尺寸事件，避免拖动窗口时反复缩放整张地图。
+        pending = getattr(self, '_map_resize_job', None)
+        if pending is not None:
+            self.root.after_cancel(pending)
+        self._map_resize_job = self.root.after(80, self._resize_map)
+
+    def _resize_map(self):
+        self._map_resize_job = None
+        self._refresh_map()
 
     # ---------- 地图 ----------
     def _select_route(self, route):
@@ -989,9 +1164,11 @@ class App(object):
                 mode = '闭环直线'
             tasks = ' → '.join('%s %.0f°' % (n, math.degrees(y)) for n, y in step['tasks']) \
                 or '—'
+            tags = (('even',) if idx % 2 == 0 else ()) + (('pass',) if not step['tasks'] else ())
             self.tree.insert('', 'end', iid=str(idx),
-                             values=(step['id'], step['name'], mode, tasks))
+                             values=(step['id'], step['name'], mode, tasks), tags=tags)
             prev = step
+        self.plan_count_var.set('%d 个点位' % len(self.plan))
         self.current_id = None
         self._refresh_map()
         self._log('已载入 %d 个点位' % len(self.plan))
@@ -1003,33 +1180,40 @@ class App(object):
 
     def _refresh_map(self):
         from PIL import Image, ImageTk
-        # 保持比例
-        scale = min(MAP_W / self.map_img.width, MAP_H / self.map_img.height)
-        disp = self.map_img.resize((int(self.map_img.width * scale),
-                                    int(self.map_img.height * scale)), Image.NEAREST)
+        # 只改变显示坐标：保持比例并居中，规划和机器人位姿仍使用原始地图坐标。
+        width, height = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if width <= 1 or height <= 1:
+            width, height = MAP_W, MAP_H
+        scale = min(max(1, width - 36) / self.map_img.width,
+                    max(1, height - 36) / self.map_img.height)
+        disp = self.map_img.resize((max(1, int(self.map_img.width * scale)),
+                                    max(1, int(self.map_img.height * scale))), Image.NEAREST)
         self.scale = scale
+        self.map_offset_x = (width - disp.width) / 2.0
+        self.map_offset_y = (height - disp.height) / 2.0
         self.canvas.delete('all')
         self.photo = ImageTk.PhotoImage(disp)
-        self.canvas.create_image(0, 0, anchor='nw', image=self.photo)
+        self.canvas.create_image(self.map_offset_x, self.map_offset_y,
+                                 anchor='nw', image=self.photo)
 
         # 路线
         for a, b in zip(self.plan, self.plan[1:]):
             self.canvas.create_line(*self._w2c(a['x'], a['y']),
                                     *self._w2c(b['x'], b['y']),
-                                    fill='#9cc4ea', width=2, tags='route')
+                                    fill='#61a8b6', width=2, dash=(6, 3), tags='route')
         # 点位
         for step in self.plan:
             cx, cy = self._w2c(step['x'], step['y'])
             self.canvas.create_oval(cx - 5, cy - 5, cx + 5, cy + 5,
-                                    fill='#1a9e1a', outline='white', width=2, tags='pt')
+                                    fill='#087f8c', outline='white', width=2, tags='pt')
             self.canvas.create_text(cx + 7, cy - 9, text=str(step['id']),
                                     font=('TkDefaultFont', 9, 'bold'), tags='pt')
         self._draw_highlight()
         self._draw_pose()
 
     def _w2c(self, x, y):
-        return ((x - self.ox) / self.res) * self.scale, \
-               (self.map_img.height - (y - self.oy) / self.res) * self.scale
+        return (self.map_offset_x + ((x - self.ox) / self.res) * self.scale,
+                self.map_offset_y + (self.map_img.height - (y - self.oy) / self.res) * self.scale)
 
     def _draw_highlight(self):
         self.canvas.delete('highlight')
@@ -1073,7 +1257,11 @@ class App(object):
             self.log_file.write(line + '\n')
             self.log_file.flush()
             self.log_box.configure(state='normal')
-            self.log_box.insert('end', line + '\n')
+            # 仅给界面着色；落盘文本和现场记录格式保持原样。
+            tag = ('record' if '点位记录：' in text or 'YAML 参考：' in text or '现场记录' in text
+                   else 'warning' if any(word in text for word in ('失败', '超时', '没有', '未启动'))
+                   else '')
+            self.log_box.insert('end', line + '\n', (tag,) if tag else ())
             self.log_box.see('end')
             self.log_box.configure(state='disabled')
 
@@ -1105,7 +1293,45 @@ class App(object):
                 self.resume_btn.configure(state='disabled')
         if not self.calibrating and str(self.cal_btn['state']) == 'disabled':
             self.cal_btn.configure(state='normal')
+        self._update_dashboard()
         self.root.after(200, self._poll)
+
+    def _update_dashboard(self):
+        """只读展示 worker 状态，不触发控制或发布消息。"""
+        c = self.colors
+        step, status, _pid, idx = (self.worker.status() if self.worker is not None
+                                    else ('', '待开始', None, -1))
+        alive = self.worker is not None and self.worker.is_alive()
+        new_plan = self.worker is not None and not alive and self.worker.plan is not self.plan
+        if new_plan:
+            # 新载入的列表不能沿用上一轮的步骤索引；只在文案里保留上轮结果。
+            step, status, idx = '新计划已就绪 · 上轮状态：' + status, '待开始', -1
+        if self.worker is not None and not alive and not new_plan and status not in (
+                '结束', '已终止', 'move_base 未启动', '没有 map->base TF'):
+            status = '已退出 · ' + status
+        badge_bg, badge_fg = '#294357', '#dbe8f2'
+        if status == '已暂停':
+            badge_bg, badge_fg = '#72501d', '#ffe0a6'
+        elif status == '运行中' and alive:
+            badge_bg, badge_fg = '#105c63', '#a2eee1'
+        elif status == '结束':
+            badge_bg, badge_fg = '#294f61', '#c6e6f3'
+        elif status == '已终止' or '未启动' in status or '没有' in status or '已退出' in status:
+            badge_bg, badge_fg = '#6b3440', '#ffd0d6'
+        self.status_var.set('扫描校准中' if self.calibrating else status)
+        self.status_badge.configure(background=badge_bg, foreground=badge_fg)
+        elapsed = (self.run_timer.snapshot()['total']
+                   if self.run_timer is not None and not new_plan else 0)
+        self.elapsed_var.set('%02d:%02d' % (int(elapsed) // 60, int(elapsed) % 60))
+        count = len(self.plan)
+        position = min(count, idx + 1) if idx is not None and idx >= 0 else 0
+        self.position_var.set('执行位置 %02d / %02d' % (position, count))
+        self.progress.configure(maximum=max(1, count), value=position)
+        self.step_var.set(step or ('计划已就绪 · 可开始巡航' if self.plan else '请先载入路线计划'))
+        enabled = alive and status == '已暂停'
+        self.teleop_hint_var.set('键盘已开放 · 点击地图后操作' if enabled
+                                 else '键盘未开放 · 仅在“已暂停”时可用')
+        self.teleop_hint.configure(foreground=c['accent'] if enabled else c['muted'])
 
     # ---------- 按钮 ----------
     def start(self):
