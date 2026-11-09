@@ -42,8 +42,9 @@ PKG_DIR = os.path.dirname(THIS_DIR)
 DEFAULT_MAP = os.path.join(PKG_DIR, 'map', 'mymap_20261106_1916_clean.yaml')
 
 MAP_W, MAP_H = 578, 484
-LONG_LEG_MIN = 1.0   # 超过这个距离的直线段用闭环
-DRIVE_SPEED = 0.28   # 闭环直线速度 m/s
+DRIVE_SPEED_LONG = 0.60   # 长直线（>2m）
+DRIVE_SPEED_MID = 0.60    # 中段（1~2m）
+DRIVE_SPEED_SHORT = 0.60  # 短段（<1m）
 
 
 class CruiseTimer(object):
@@ -213,12 +214,18 @@ def estimate_pose(base_points, dist, res, ox, oy, sigma=0.08):
 class CruiseWorker(threading.Thread):
     def __init__(self, plan, dwell, strafe_ids, strafe_speed, map_frame,
                  log_fn, on_status, pose_get=None, base_frame='base_footprint',
-                 run_timer=None):
+                 run_timer=None, drive_long=DRIVE_SPEED_LONG,
+                 drive_mid=DRIVE_SPEED_MID, drive_short=DRIVE_SPEED_SHORT,
+                 rot_speed=1.00):
         super(CruiseWorker, self).__init__(daemon=True)
         self.plan = plan
         self.dwell = dwell
         self.strafe_ids = strafe_ids
         self.strafe_speed = max(0.02, min(0.15, float(strafe_speed)))
+        self.drive_long = max(0.10, min(0.60, float(drive_long)))
+        self.drive_mid = max(0.10, min(0.60, float(drive_mid)))
+        self.drive_short = max(0.10, min(0.60, float(drive_short)))
+        self.rot_speed = max(0.20, min(1.00, float(rot_speed)))
         self.map_frame = map_frame
         self.base_frame = base_frame
         self.log_fn = log_fn
@@ -521,7 +528,7 @@ class CruiseWorker(threading.Thread):
                     self.log('    转向超时（目标 %.0f°）' % math.degrees(target))
                     return False
                 # 比例控制，接近目标自动减速，避免一侧轮子突然发力
-                cmd = min(0.55, max(0.20, 1.5 * abs(err)))
+                cmd = min(self.rot_speed, max(0.20, 1.5 * abs(err)))
                 twist = Twist()
                 twist.angular.z = (1.0 if err > 0 else -1.0) * cmd
                 self._pub.publish(twist)
@@ -695,17 +702,19 @@ class CruiseWorker(threading.Thread):
                         self._rotate_to(bearing, '对准 %s' % step['id'])
                         if self._stop_evt.is_set():
                             break
-                    if (not close and dist_to_goal is not None
-                            and dist_to_goal > LONG_LEG_MIN):
-                        self.log('  长直线闭环 %.2f m' % dist_to_goal)
-                        arrived = self._align_to(
-                            step['x'], step['y'], tol=0.02,
-                            speed=DRIVE_SPEED,
-                            timeout=dist_to_goal / DRIVE_SPEED * 2.0 + 5.0,
-                            hold_yaw=bearing)
+                    travel_dist = dist_to_goal if dist_to_goal is not None else 1.0
+                    if travel_dist > 2.0:
+                        travel_speed = self.drive_long
+                    elif travel_dist > 1.0:
+                        travel_speed = self.drive_mid
                     else:
-                        arrived = self._send_goal(step['x'], step['y'], goal_yaw,
-                                                  '点位 %s' % step['id'])
+                        travel_speed = self.drive_short
+                    self.log('  闭环直线 %.2f m（%.2f m/s）' % (travel_dist, travel_speed))
+                    arrived = self._align_to(
+                        step['x'], step['y'], tol=0.02,
+                        speed=travel_speed,
+                        timeout=travel_dist / travel_speed * 2.0 + 5.0,
+                        hold_yaw=goal_yaw)
                     # 有识别任务时不再先转“到达朝向”，直接让第一个识别朝向去转，
                     # 少一次来回；只有无任务且下一段是平移时才需要先摆正
                     if arrived and not step['tasks'] and next_is_strafe:
@@ -854,6 +863,26 @@ class App(object):
         ttk.Checkbutton(top, text='跳过0号点', variable=self.skip0_var,
                         command=self._reload_plan).pack(side='left', padx=(0, 10))
         ttk.Button(top, text='载入计划', command=self._reload_plan).pack(side='left')
+
+        speed_frame = ttk.Frame(self.root, padding=(6, 0, 6, 4))
+        speed_frame.pack(fill='x')
+        ttk.Label(speed_frame, text='直线速度 长').pack(side='left')
+        self.long_speed_var = tk.StringVar(value='%.2f' % DRIVE_SPEED_LONG)
+        ttk.Spinbox(speed_frame, from_=0.10, to=0.60, increment=0.01, width=5,
+                    textvariable=self.long_speed_var).pack(side='left', padx=(2, 8))
+        ttk.Label(speed_frame, text='中').pack(side='left')
+        self.mid_speed_var = tk.StringVar(value='%.2f' % DRIVE_SPEED_MID)
+        ttk.Spinbox(speed_frame, from_=0.10, to=0.60, increment=0.01, width=5,
+                    textvariable=self.mid_speed_var).pack(side='left', padx=(2, 8))
+        ttk.Label(speed_frame, text='短').pack(side='left')
+        self.short_speed_var = tk.StringVar(value='%.2f' % DRIVE_SPEED_SHORT)
+        ttk.Spinbox(speed_frame, from_=0.10, to=0.60, increment=0.01, width=5,
+                    textvariable=self.short_speed_var).pack(side='left', padx=(2, 12))
+        ttk.Label(speed_frame, text='转向 rad/s').pack(side='left')
+        self.rot_speed_var = tk.StringVar(value='1.00')
+        ttk.Spinbox(speed_frame, from_=0.20, to=1.00, increment=0.05, width=5,
+                    textvariable=self.rot_speed_var).pack(side='left', padx=(2, 12))
+        ttk.Label(speed_frame, text='（点击“开始”时生效）').pack(side='left')
 
         body = ttk.Frame(self.root, padding=6)
         body.pack(fill='both', expand=True)
@@ -1072,6 +1101,13 @@ class App(object):
         dwell = float(self.dwell_var.get())
         speed = max(0.02, min(0.15, float(self.speed_var.get())))
         self.speed_var.set('%.2f' % speed)
+        long_speed = max(0.10, min(0.60, float(self.long_speed_var.get())))
+        mid_speed = max(0.10, min(0.60, float(self.mid_speed_var.get())))
+        short_speed = max(0.10, min(0.60, float(self.short_speed_var.get())))
+        rot_speed = max(0.20, min(1.00, float(self.rot_speed_var.get())))
+        for var, val in ((self.long_speed_var, long_speed), (self.mid_speed_var, mid_speed),
+                         (self.short_speed_var, short_speed), (self.rot_speed_var, rot_speed)):
+            var.set('%.2f' % val)
         self.run_timer = CruiseTimer()
         self.log_file.write('\n===== 开始巡航 %s =====\n'
                             % datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -1079,7 +1115,9 @@ class App(object):
                                    self.args.map_frame, self._log, lambda: None,
                                    pose_get=self.pose_tracker.get,
                                    base_frame=self.args.base_frame,
-                                   run_timer=self.run_timer)
+                                   run_timer=self.run_timer,
+                                   drive_long=long_speed, drive_mid=mid_speed,
+                                   drive_short=short_speed, rot_speed=rot_speed)
         self.worker.start()
         self.start_btn.configure(state='disabled')
         self.pause_btn.configure(state='normal')
@@ -1224,7 +1262,7 @@ def main():
     ap.add_argument('--points', default=DEFAULT_POINTS)
     ap.add_argument('--routes', default=DEFAULT_ROUTES)
     ap.add_argument('--route', default=None)
-    ap.add_argument('--dwell', type=float, default=2.0)
+    ap.add_argument('--dwell', type=float, default=1.0)
     ap.add_argument('--strafe-ids', default=DEFAULT_STRAFE_IDS)
     ap.add_argument('--strafe-speed', type=float, default=0.15)
     ap.add_argument('--no-strafe', action='store_true')
