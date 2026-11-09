@@ -209,6 +209,22 @@ python3 /home/mowen/bit_ws/src/photo_capture/scripts/count_video.py \
 
 注意：**逐帧检测后相加一定会重复**；只有跟踪得到的唯一 ID 才能当数量。
 
+### 给导航/其他脚本的接口
+
+`count_video.py` 提供稳定的 Python 函数和 `--json` 子进程接口，导航脚本不要解析
+人类可读 stdout。完整契约、字段和调用示例见
+[INTEGRATION.md](INTEGRATION.md)。
+
+```python
+from count_video import count_video
+result = count_video(video=".../sweep.avi", min_frames=20)
+print(result.count, result.by_class)
+```
+
+```bash
+python3 count_video.py --video ... --json   # stdout 只有 JSON
+```
+
 ### 全景检测
 
 拼接成功后点「检测全景」（或 CLI 加 `--detect-panorama`）：
