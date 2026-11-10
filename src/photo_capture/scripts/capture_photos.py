@@ -490,6 +490,232 @@ class Session:
 # 启动时 / 运行中的类型输入对话框（tkinter）
 # ---------------------------------------------------------------------------
 
+# 共用的 Tk 展示组件：不持有设备、任务或设置状态。
+GUI_COLORS = {
+    "bg": "#edf2f6", "card": "#ffffff", "ink": "#203247",
+    "muted": "#687b8e", "line": "#dbe4ec", "navy": "#172b40",
+    "accent": "#087f8c", "danger": "#b83d4c",
+}
+
+
+def _setup_gui_theme(widget):
+    """仅配置 Tk 字体和本脚本使用的样式，可由任一入口独立调用。"""
+    families = set(tkfont.families(widget))
+    family = tkfont.Font(root=widget, name="TkDefaultFont", exists=True).actual("family")
+    font_path = find_cjk_font()
+    if font_path and PIL_AVAILABLE:
+        try:
+            # 与已有预览叠字共用字体发现入口；只选 Tk 实际安装的字体族。
+            candidate = ImageFont.truetype(font_path, 12).getname()[0]
+            if candidate in families:
+                family = candidate
+        except (OSError, ValueError):
+            pass
+    for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+        tkfont.Font(root=widget, name=name, exists=True).configure(family=family, size=10)
+    c = GUI_COLORS
+    style = ttk.Style(widget)
+    if style.theme_use() != "clam":
+        style.theme_use("clam")
+    style.configure("TFrame", background=c["card"])
+    style.configure("TLabel", background=c["card"], foreground=c["ink"])
+    style.configure("Capture.Background.TFrame", background=c["bg"])
+    style.configure("Capture.Card.TFrame", background=c["card"])
+    style.configure("Capture.Section.TLabel", font=(family, 11, "bold"))
+    style.configure("Capture.Muted.TLabel", foreground=c["muted"])
+    style.configure("TButton", padding=(10, 5), background="#f1f5f9",
+                    bordercolor=c["line"], focuscolor=c["accent"])
+    style.map("TButton", background=[("active", "#e3edf4")],
+              foreground=[("disabled", "#9ba9b6")])
+    for name, color, hover in (("Accent", c["accent"], "#066b77"),
+                                ("Danger", c["danger"], "#9f2f3d")):
+        key = "Capture." + name + ".TButton"
+        style.configure(key, background=color, foreground="white", bordercolor=color,
+                        font=(family, 10, "bold"))
+        style.map(key, background=[("disabled", "#e6ecf1"), ("active", hover)],
+                  foreground=[("disabled", "#9ba9b6"), ("!disabled", "white")],
+                  bordercolor=[("disabled", c["line"])])
+    for key in ("TEntry", "TSpinbox", "TCombobox"):
+        style.configure(key, padding=4, fieldbackground="white", bordercolor=c["line"])
+    style.map("TCombobox", fieldbackground=[("readonly", "white")])
+    for key in ("TCheckbutton", "TRadiobutton"):
+        style.configure(key, background="white")
+        style.map(key, background=[("active", "white")])
+    style.configure("Horizontal.TProgressbar", background=c["accent"],
+                    troughcolor="#e7eef3", borderwidth=0, thickness=5)
+    widget.configure(background=c["bg"])
+    return family
+
+
+def _gui_header(parent, title, subtitle=""):
+    family = _setup_gui_theme(parent)
+    c = GUI_COLORS
+    header = tk.Frame(parent, background=c["navy"], padx=18, pady=10)
+    header.pack(fill="x")
+    tk.Label(header, text=title, background=c["navy"], foreground="white",
+             font=(family, 17, "bold")).pack(side="left")
+    if subtitle:
+        tk.Label(header, text=subtitle, background=c["navy"], foreground="#9fb5c9",
+                 font=(family, 9)).pack(side="left", padx=14)
+    return header
+
+
+def _dialog_body(dialog, title, padding=(20, 14)):
+    _gui_header(dialog, title, "VISUAL TOOLS / SETTINGS")
+    body = ttk.Frame(dialog, style="Capture.Card.TFrame", padding=padding)
+    body.pack(fill="both", expand=True, padx=12, pady=12)
+    return body
+
+
+class _CapturePreview(tk.Label if TK_AVAILABLE else object):
+    """只缩放已经画好的预览图；原始帧、检测坐标和保存图像不受影响。"""
+
+    def __init__(self, parent):
+        super().__init__(parent, background=GUI_COLORS["navy"], foreground="#a5bdcf",
+                         text="正在打开摄像头…", takefocus=True, borderwidth=0)
+        self._source_image = None
+        self._display_photo = None
+        self.bind("<Configure>", self._fit_on_resize)
+        self.bind("<Button-1>", lambda event: self.focus_set())
+
+    def fit_image(self, image):
+        self._source_image = image
+        width, height = self.winfo_width(), self.winfo_height()
+        if width <= 1 or height <= 1:
+            width, height = MAX_PREVIEW_W, MAX_PREVIEW_H
+        scale = min(1.0, max(1, width - 4) / image.width,
+                    max(1, height - 4) / image.height)
+        if scale < 1.0:
+            image = image.resize((max(1, int(image.width * scale)),
+                                  max(1, int(image.height * scale))), Image.BILINEAR)
+        self._display_photo = ImageTk.PhotoImage(image, master=self)
+        return self._display_photo
+
+    def _fit_on_resize(self, _event=None):
+        if self._source_image is not None:
+            photo = self.fit_image(self._source_image)
+            self.configure(image=photo, text="")
+
+
+def _workspace(app, title, subtitle, hint):
+    """主操作常驻，次级工具可滚动；预览与侧栏可拖动调宽。"""
+    root = app.root
+    header = _gui_header(root, title, subtitle)
+    app._bold_font.configure(family=tkfont.Font(
+        root=root, name="TkDefaultFont", exists=True).actual("family"))
+    if hasattr(app, "fps_var"):
+        tk.Label(header, textvariable=app.fps_var, background=GUI_COLORS["navy"],
+                 foreground="#b8d4e2").pack(side="right")
+    root.geometry("{}x{}".format(min(1140, root.winfo_screenwidth() - 60),
+                                min(800, root.winfo_screenheight() - 100)))
+    footer = ttk.Frame(root, style="Capture.Card.TFrame", padding=(14, 8))
+    footer.pack(side="bottom", fill="x", padx=12, pady=(0, 12))
+    app.status_label = ttk.Label(footer, textvariable=app.status_var, foreground="#444444",
+                                wraplength=1000, justify="left")
+    app.status_label.pack(fill="x")
+    footer.bind("<Configure>", lambda event: app.status_label.configure(
+        wraplength=max(100, event.width - 28)))
+    body = ttk.Panedwindow(root, orient="horizontal")
+    body.pack(fill="both", expand=True, padx=12, pady=12)
+    preview_card = ttk.Frame(body, style="Capture.Card.TFrame", padding=12)
+    sidebar = ttk.Frame(body, style="Capture.Card.TFrame", padding=12)
+    body.add(preview_card, weight=3)
+    body.add(sidebar, weight=1)
+    preview_card.columnconfigure(0, weight=1)
+    preview_card.rowconfigure(1, weight=1)
+    ttk.Label(preview_card, text="实时预览", style="Capture.Section.TLabel").grid(
+        row=0, column=0, sticky="w", pady=(0, 9))
+    # 禁用图像的请求尺寸传播，避免大图把侧栏或底部状态挤到窗口之外。
+    viewport = ttk.Frame(preview_card, width=640, height=480)
+    viewport.grid(row=1, column=0, sticky="nsew")
+    viewport.grid_propagate(False)
+    viewport.rowconfigure(0, weight=1)
+    viewport.columnconfigure(0, weight=1)
+    app.preview = _CapturePreview(viewport)
+    app.preview.grid(row=0, column=0, sticky="nsew")
+    ttk.Label(preview_card, text=hint, style="Capture.Muted.TLabel", wraplength=500,
+              justify="left").grid(row=2, column=0, sticky="ew", pady=(9, 0))
+    app.preview_hint = preview_card.winfo_children()[-1]
+    preview_card.bind("<Configure>", lambda event: app.preview_hint.configure(
+        wraplength=max(100, event.width - 24)))
+    primary = ttk.Frame(sidebar, style="Capture.Card.TFrame")
+    primary.pack(fill="x", pady=(0, 10))
+    ttk.Label(primary, text="操作控制", style="Capture.Section.TLabel").pack(
+        anchor="w", pady=(0, 8))
+    # 内容不足一屏时仍可滚动，且只在侧栏自身响应滚轮，不绑定全局按键。
+    scroll_area = ttk.Frame(sidebar)
+    scroll_area.pack(fill="both", expand=True)
+    canvas = tk.Canvas(scroll_area, width=250, highlightthickness=0,
+                       background=GUI_COLORS["card"])
+    scrollbar = ttk.Scrollbar(scroll_area, orient="vertical", command=canvas.yview)
+    scrollbar.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    canvas.configure(yscrollcommand=scrollbar.set)
+    content = ttk.Frame(canvas, style="Capture.Card.TFrame")
+    item = canvas.create_window(0, 0, anchor="nw", window=content)
+    canvas.bind("<Configure>", lambda event: canvas.itemconfigure(item, width=event.width))
+    content.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Button-4>", lambda event: canvas.yview_scroll(-1, "units"))
+    canvas.bind("<Button-5>", lambda event: canvas.yview_scroll(1, "units"))
+    canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(
+        -1 if event.delta > 0 else 1, "units"))
+    root.after_idle(lambda: _wire_sidebar_scroll(canvas, content))
+    app.sidebar_canvas = canvas
+    app.workspace = body
+    body.bind("<Configure>", lambda event: _fit_workspace(body, event.width))
+    return primary, content
+
+
+def _wire_sidebar_scroll(canvas, content):
+    """为这一个侧栏附加局部滚轮标签，不抢 Entry/Spinbox 的原生行为。"""
+    tag = "CaptureSidebar:" + str(canvas)
+
+    def scroll(event):
+        direction = -1 if getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0 else 1
+        canvas.yview_scroll(direction, "units")
+        return "break"
+
+    for event in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
+        canvas.bind_class(tag, event, scroll)
+    text_inputs = (tk.Entry, tk.Text, tk.Spinbox, ttk.Entry, ttk.Spinbox, ttk.Combobox)
+
+    def attach(widget):
+        if not isinstance(widget, text_inputs):
+            tags = widget.bindtags()
+            widget.bindtags((tags[0], tag) + tags[1:])
+        for child in widget.winfo_children():
+            attach(child)
+
+    attach(content)
+
+
+def _fit_workspace(panes, width):
+    if width <= 1:
+        return
+    if not getattr(panes, "_initial_sash_set", False):
+        panes.sashpos(0, max(140, width - 300))
+        panes._initial_sash_set = True
+    else:
+        # 窗口变小时，预览和常驻控制至少各保留一块可用区域。
+        panes.sashpos(0, max(140, min(panes.sashpos(0), width - 240)))
+
+
+def _section(parent, title):
+    section = ttk.Frame(parent, style="Capture.Card.TFrame")
+    section.pack(fill="x", pady=(2, 12))
+    ttk.Label(section, text=title, style="Capture.Section.TLabel").pack(
+        anchor="w", pady=(0, 6))
+    return section
+
+
+def _action(parent, text, command, primary=False, danger=False, state="normal"):
+    style = ("Capture.Danger.TButton" if danger else "Capture.Accent.TButton"
+             if primary else "TButton")
+    button = ttk.Button(parent, text=text, command=command, state=state, style=style)
+    button.pack(fill="x", pady=(0, 6))
+    return button
+
+
 class AskTypeDialog(tk.Toplevel if TK_AVAILABLE else object):
     """询问照片类型（可选连拍张数）的模态小窗口。"""
 
@@ -499,6 +725,7 @@ class AskTypeDialog(tk.Toplevel if TK_AVAILABLE else object):
         if not TK_AVAILABLE:
             raise RuntimeError("tkinter 不可用")
         super().__init__(parent)
+        _setup_gui_theme(self)
         self.result = None
         self.with_count = bool(with_count)
         self.output_root = Path(output_root)
@@ -526,8 +753,7 @@ class AskTypeDialog(tk.Toplevel if TK_AVAILABLE else object):
 
     # -- 界面 ---------------------------------------------------------
     def _build(self) -> None:
-        body = ttk.Frame(self, padding=(20, 16))
-        body.pack(fill="both", expand=True)
+        body = _dialog_body(self, self.title())
         body.columnconfigure(1, weight=1)
 
         if self.with_count:
@@ -552,7 +778,9 @@ class AskTypeDialog(tk.Toplevel if TK_AVAILABLE else object):
             box.grid(row=row, column=1, sticky="we", pady=(4, 0))
             self.listbox = tk.Listbox(
                 box, height=min(5, len(types)), exportselection=False,
-                activestyle="dotbox", font=("", 11),
+                activestyle="dotbox", font="TkDefaultFont",
+                background="#f4f8fb", foreground="#203247", relief="flat",
+                selectbackground="#d8eeef", selectforeground="#075b65",
             )
             self.listbox.pack(side="left", fill="both", expand=True)
             scrollbar = ttk.Scrollbar(box, orient="vertical", command=self.listbox.yview)
@@ -584,7 +812,8 @@ class AskTypeDialog(tk.Toplevel if TK_AVAILABLE else object):
         buttons = ttk.Frame(body)
         buttons.grid(row=row, column=0, columnspan=2, sticky="e", pady=(8, 0))
         ttk.Button(buttons, text="取消", command=self._cancel).pack(side="right")
-        self.ok_button = ttk.Button(buttons, text="开始拍照", command=self._ok)
+        self.ok_button = ttk.Button(buttons, text="开始拍照", command=self._ok,
+                                    style="Capture.Accent.TButton")
         self.ok_button.pack(side="right", padx=(0, 8))
 
         ttk.Label(
@@ -647,6 +876,7 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         if not TK_AVAILABLE:
             raise RuntimeError("tkinter 不可用")
         super().__init__(parent)
+        _setup_gui_theme(self)
         self.result = None
         self.title(title)
         self.resizable(False, False)
@@ -660,13 +890,12 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         self._button_font = tkfont.Font(root=self, size=12, weight="bold")
         self._sub_font = tkfont.Font(root=self, size=10)
 
-        body = ttk.Frame(self, padding=(24, 20))
-        body.pack(fill="both", expand=True)
+        body = _dialog_body(self, self.title(), padding=(20, 16))
         ttk.Label(body, text="请选择启动模式", font=self._title_font).pack(anchor="w")
         ttk.Label(
             body,
             text="拍照采集训练照片；模型测试做实时 YOLO 检测；区域扫描用平移拼图；仪表识别读温度/湿度表。",
-            foreground="#666666",
+            wraplength=560, justify="left", foreground="#687b8e",
             font=self._sub_font,
         ).pack(anchor="w", pady=(2, 18))
 
@@ -675,52 +904,56 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         self.photo_button = tk.Button(
             buttons, text="拍照模式\n\n按类型采集照片",
             width=14, height=4, justify="center", font=self._button_font,
-            relief="groove", bd=2, cursor="hand2",
+            relief="flat", bd=0, cursor="hand2", background="#087f8c",
+            foreground="white", activebackground="#066b77", activeforeground="white",
             command=lambda: self._choose(MODE_PHOTO),
         )
-        self.photo_button.pack(side="left", padx=(0, 10))
+        self.photo_button.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=(0, 10))
 
         if YOLO_RUNTIME_AVAILABLE:
             self.detect_button = tk.Button(
                 buttons, text="模型测试\n\nYOLO 实时检测",
                 width=14, height=4, justify="center", font=self._button_font,
-                relief="groove", bd=2, cursor="hand2",
+                relief="flat", bd=0, cursor="hand2", background="#087f8c",
+                foreground="white", activebackground="#066b77", activeforeground="white",
                 command=lambda: self._choose(MODE_DETECT),
             )
-            self.detect_button.pack(side="left", padx=(0, 10))
+            self.detect_button.grid(row=0, column=1, sticky="nsew", pady=(0, 10))
         else:
             ttk.Label(
                 buttons, text="模型测试不可用\n（没装 ultralytics）",
                 justify="center", foreground="#b00020", width=16,
-            ).pack(side="left", padx=(0, 10))
+            ).grid(row=0, column=1, sticky="nsew", pady=(0, 10))
 
         if SCAN_MODULE_AVAILABLE:
             self.scan_button = tk.Button(
                 buttons, text="区域扫描\n\n平移拼大图",
                 width=14, height=4, justify="center", font=self._button_font,
-                relief="groove", bd=2, cursor="hand2",
+                relief="flat", bd=0, cursor="hand2", background="#087f8c",
+                foreground="white", activebackground="#066b77", activeforeground="white",
                 command=lambda: self._choose(MODE_SCAN),
             )
-            self.scan_button.pack(side="left", padx=(0, 10))
+            self.scan_button.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
         else:
             ttk.Label(
                 buttons, text="区域扫描不可用\n（缺少 scan.py）",
                 justify="center", foreground="#b00020", width=16,
-            ).pack(side="left", padx=(0, 10))
+            ).grid(row=1, column=0, sticky="nsew", padx=(0, 10))
 
         if GAUGE_MODULE_AVAILABLE and YOLO_RUNTIME_AVAILABLE:
             self.gauge_button = tk.Button(
                 buttons, text="仪表识别\n\nPose 读表计",
                 width=14, height=4, justify="center", font=self._button_font,
-                relief="groove", bd=2, cursor="hand2",
+                relief="flat", bd=0, cursor="hand2", background="#087f8c",
+                foreground="white", activebackground="#066b77", activeforeground="white",
                 command=lambda: self._choose(MODE_GAUGE),
             )
-            self.gauge_button.pack(side="left")
+            self.gauge_button.grid(row=1, column=1, sticky="nsew")
         else:
             ttk.Label(
                 buttons, text="仪表识别不可用\n（缺少 gauge.py/ultralytics）",
                 justify="center", foreground="#b00020", width=16,
-            ).pack(side="left")
+            ).grid(row=1, column=1, sticky="nsew")
 
         ttk.Label(
             body,
@@ -773,6 +1006,7 @@ class ModelDialog(tk.Toplevel if TK_AVAILABLE else object):
         if not YOLO_MODULE_AVAILABLE:
             raise RuntimeError("yolo_detect 模块不可用")
         super().__init__(parent)
+        _setup_gui_theme(self)
         self.result = None
         self.model_dir = Path(model_dir).expanduser()
         self.selected = Path(initial_model).expanduser() if initial_model else None
@@ -816,8 +1050,7 @@ class ModelDialog(tk.Toplevel if TK_AVAILABLE else object):
         self._center()
 
     def _build(self) -> None:
-        body = ttk.Frame(self, padding=(20, 16))
-        body.pack(fill="both", expand=True)
+        body = _dialog_body(self, self.title())
 
         ttk.Label(body, text="选择要测试的 YOLO 模型",
                   font=self._title_font).pack(anchor="w")
@@ -833,7 +1066,9 @@ class ModelDialog(tk.Toplevel if TK_AVAILABLE else object):
         box.pack(fill="both", expand=True)
         self.listbox = tk.Listbox(
             box, height=min(9, max(3, len(self._models))),
-            exportselection=False, width=46, font=("", 11),
+            exportselection=False, width=46, font="TkDefaultFont",
+            background="#f4f8fb", foreground="#203247", relief="flat",
+            selectbackground="#d8eeef", selectforeground="#075b65",
         )
         self.listbox.pack(side="left", fill="both", expand=True)
         scrollbar = ttk.Scrollbar(
@@ -863,7 +1098,8 @@ class ModelDialog(tk.Toplevel if TK_AVAILABLE else object):
         buttons = ttk.Frame(body)
         buttons.pack(fill="x", pady=(12, 0))
         ttk.Button(buttons, text="浏览…", command=self._browse).pack(side="left")
-        ttk.Button(buttons, text="开始检测", command=self._ok).pack(side="right")
+        ttk.Button(buttons, text="开始检测", command=self._ok,
+                   style="Capture.Accent.TButton").pack(side="right")
         ttk.Button(buttons, text="取消", command=self._cancel).pack(
             side="right", padx=(0, 8))
 
@@ -960,37 +1196,27 @@ class PhotoApp(object):
 
     # -- 界面 ---------------------------------------------------------
     def _build_ui(self) -> None:
-        top = ttk.Frame(self.root, padding=(14, 12, 14, 4))
-        top.pack(fill="x")
-
-        ttk.Label(top, text="类型：").pack(side="left")
-        ttk.Label(top, textvariable=self.type_var, font=self._bold_font).pack(side="left")
-        ttk.Button(top, text="更换类型", command=self.change_type).pack(
-            side="left", padx=(10, 0))
-
-        ttk.Label(top, text="一次连拍：").pack(side="left", padx=(18, 2))
+        primary, content = _workspace(
+            self, "拍照采集", "PHOTO CAPTURE",
+            "空格 / 回车 拍照  ·  T 更换类型  ·  N 连拍张数  ·  Esc 退出\n"
+            "输入框聚焦时不接管拍照快捷键；点击预览回到操作区。")
+        self.shoot_button = _action(primary, "拍照（空格）", self.shoot, primary=True)
+        settings = _section(content, "采集设置")
+        ttk.Label(settings, text="当前类型", style="Capture.Muted.TLabel").pack(anchor="w")
+        ttk.Label(settings, textvariable=self.type_var, font=self._bold_font,
+                  wraplength=230).pack(anchor="w", pady=(2, 6))
+        _action(settings, "更换类型 (T)", self.change_type)
+        count_row = ttk.Frame(settings)
+        count_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(count_row, text="一次连拍 / 张").pack(side="left")
         self.count_spin = ttk.Spinbox(
-            top, from_=1, to=MAX_BURST, width=4, textvariable=self.count_var,
+            count_row, from_=1, to=MAX_BURST, width=4, textvariable=self.count_var,
             command=self._on_count_change)
-        self.count_spin.pack(side="left")
-        ttk.Label(top, text="张").pack(side="left", padx=(2, 0))
-
-        self.shoot_button = ttk.Button(top, text="拍照（空格）", command=self.shoot)
-        self.shoot_button.pack(side="right")
-
-        self.preview = tk.Label(
-            self.root, bg="#141414", fg="#bbbbbb",
-            text="正在打开摄像头…", takefocus=True,
-        )
-        self.preview.pack(fill="both", expand=True, padx=14, pady=6)
-        self.preview.bind("<Button-1>", lambda event: self.preview.focus_set())
-
-        bottom = ttk.Frame(self.root, padding=(14, 0, 14, 10))
-        bottom.pack(fill="x")
-        self.status_label = ttk.Label(
-            bottom, textvariable=self.status_var, foreground="#444444")
-        self.status_label.pack(side="left")
-        ttk.Button(bottom, text="打开保存目录", command=self.open_folder).pack(side="right")
+        self.count_spin.pack(side="right")
+        files = _section(content, "文件与记录")
+        _action(files, "打开保存目录", self.open_folder)
+        ttk.Label(files, text=display_path(self.output_root),
+                  style="Capture.Muted.TLabel", wraplength=225, justify="left").pack(anchor="w")
 
     def _bind_keys(self) -> None:
         self.root.bind("<space>", self._on_space)
@@ -1198,7 +1424,7 @@ class PhotoApp(object):
         try:
             image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             image = self._decorate(image, now)
-            photo = ImageTk.PhotoImage(image)
+            photo = self.preview.fit_image(image)
         except Exception:
             return
         self._photo = photo
@@ -1343,43 +1569,31 @@ class DetectApp(object):
             display_path(self.model_path), len(names), preview)
 
     def _build_ui(self) -> None:
-        top = ttk.Frame(self.root, padding=(14, 12, 14, 4))
-        top.pack(fill="x")
-        ttk.Label(top, text="模型：").pack(side="left")
-        ttk.Label(top, textvariable=self.model_var,
-                  font=self._bold_font).pack(side="left")
-        ttk.Button(top, text="更换模型 (M)",
-                   command=self.change_model).pack(side="left", padx=(8, 0))
-
-        ttk.Label(top, text="置信度：").pack(side="left", padx=(14, 2))
+        primary, content = _workspace(
+            self, "模型测试", "DETECTION WORKBENCH",
+            "M 更换模型  ·  S 保存当前帧  ·  C 保存裁剪图  ·  Esc 退出\n"
+            "拖动分隔线调整预览 / 侧栏；输入框聚焦时保留文字输入。")
+        _action(primary, "保存当前帧 (S)", self.save_snapshot, primary=True)
+        _action(primary, "保存裁剪图 (C)", self.save_crops)
+        stats = _section(content, "实时信息")
+        ttk.Label(stats, textvariable=self.infer_var).pack(anchor="w")
+        ttk.Label(stats, textvariable=self.det_var).pack(anchor="w", pady=(3, 0))
+        settings = _section(content, "模型与阈值")
+        ttk.Label(settings, textvariable=self.model_var, font=self._bold_font,
+                  wraplength=230).pack(anchor="w", pady=(0, 6))
+        _action(settings, "更换模型 (M)", self.change_model)
+        row = ttk.Frame(settings)
+        row.pack(fill="x", pady=(4, 0))
+        ttk.Label(row, text="置信度").pack(side="left")
         self.conf_spin = ttk.Spinbox(
-            top, from_=0.05, to=0.95, increment=0.05, width=5,
+            row, from_=0.05, to=0.95, increment=0.05, width=5,
             textvariable=self.conf_var, command=self._sync_conf)
-        self.conf_spin.pack(side="left")
+        self.conf_spin.pack(side="right")
         self.conf_spin.bind("<Return>", lambda event: self._sync_conf())
         self.conf_spin.bind("<FocusOut>", lambda event: self._sync_conf())
-
-        ttk.Label(top, textvariable=self.infer_var).pack(side="left", padx=(14, 0))
-        ttk.Label(top, textvariable=self.det_var).pack(side="left", padx=(10, 0))
-        ttk.Button(top, text="保存当前帧 (S)",
-                   command=self.save_snapshot).pack(side="right")
-        ttk.Button(top, text="保存裁剪图 (C)",
-                   command=self.save_crops).pack(side="right", padx=(0, 6))
-
-        self.preview = tk.Label(
-            self.root, bg="#141414", fg="#bbbbbb",
-            text="正在打开摄像头…", takefocus=True,
-        )
-        self.preview.pack(fill="both", expand=True, padx=14, pady=6)
-        self.preview.bind("<Button-1>", lambda event: self.preview.focus_set())
-
-        bottom = ttk.Frame(self.root, padding=(14, 0, 14, 10))
-        bottom.pack(fill="x")
-        self.status_label = ttk.Label(
-            bottom, textvariable=self.status_var, foreground="#444444")
-        self.status_label.pack(side="left")
-        ttk.Label(bottom, textvariable=self.fps_var,
-                  foreground="#666666").pack(side="right")
+        files = _section(content, "保存位置")
+        ttk.Label(files, text=display_path(self.snapshot_root),
+                  style="Capture.Muted.TLabel", wraplength=225, justify="left").pack(anchor="w")
 
     def _bind_keys(self) -> None:
         self.root.bind("<KeyPress-m>", self._on_key_m)
@@ -1534,7 +1748,7 @@ class DetectApp(object):
         try:
             image = Image.fromarray(cv2.cvtColor(display, cv2.COLOR_BGR2RGB))
             image = self._annotate(image, boxes, scale, infer_ms=infer_ms)
-            photo = ImageTk.PhotoImage(image)
+            photo = self.preview.fit_image(image)
         except Exception:
             return
         self._photo = photo
@@ -1728,6 +1942,7 @@ class ScanDialog(tk.Toplevel if TK_AVAILABLE else object):
         if not SCAN_MODULE_AVAILABLE:
             raise RuntimeError("scan 模块不可用")
         super().__init__(parent)
+        _setup_gui_theme(self)
         self.result = None
         self.title(title)
         self.resizable(False, False)
@@ -1753,8 +1968,7 @@ class ScanDialog(tk.Toplevel if TK_AVAILABLE else object):
         self.error_var = tk.StringVar(value="")
         self.summary_var = tk.StringVar(value="")
 
-        body = ttk.Frame(self, padding=(22, 16))
-        body.pack(fill="both", expand=True)
+        body = _dialog_body(self, self.title(), padding=(20, 12))
         body.columnconfigure(1, weight=1)
 
         ttk.Label(body, text="区域扫描设置", font=self._title_font).grid(
@@ -1762,7 +1976,7 @@ class ScanDialog(tk.Toplevel if TK_AVAILABLE else object):
         ttk.Label(
             body,
             text="自动平移需要 newt.py；手动录制只录画面，不控制底盘（现有键盘遥控不支持横移）。",
-            foreground="#666666",
+            wraplength=560, justify="left", foreground="#687b8e",
             font=self._sub_font,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 10))
 
@@ -1850,7 +2064,8 @@ class ScanDialog(tk.Toplevel if TK_AVAILABLE else object):
         buttons = ttk.Frame(body)
         buttons.grid(row=row, column=0, columnspan=2, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="取消", command=self._cancel).pack(side="right")
-        ttk.Button(buttons, text="开始扫描", command=self._ok).pack(
+        ttk.Button(buttons, text="开始扫描", command=self._ok,
+                   style="Capture.Accent.TButton").pack(
             side="right", padx=(0, 8))
 
         for var in (self.mode_var, self.label_var, self.frames_var,
@@ -1974,52 +2189,31 @@ class ScanApp(object):
         self._tick()
 
     def _build_ui(self) -> None:
-        top = ttk.Frame(self.root, padding=(14, 12, 14, 4))
-        top.pack(fill="x")
-        ttk.Label(top, text="区域扫描：").pack(side="left")
-        ttk.Label(top, textvariable=self.mode_var,
-                  font=self._bold_font).pack(side="left")
-        self.start_button = ttk.Button(
-            top, text=("开始扫描" if self.settings.mode == "strafe" else "开始录制"),
-            command=self.start_scan)
-        self.start_button.pack(side="left", padx=(14, 0))
-        self.stop_button = ttk.Button(
-            top, text="停止", command=self.stop_scan, state="disabled")
-        self.stop_button.pack(side="left", padx=(6, 0))
-        self.detect_button = ttk.Button(
-            top, text="检测全景", state="disabled",
-            command=self.detect_panorama)
-        self.detect_button.pack(side="right")
-        self.crop_button = ttk.Button(
-            top, text="保存裁剪 (C)", state="disabled",
-            command=self.save_crops)
-        self.crop_button.pack(side="right", padx=(0, 6))
-        self.view_button = ttk.Button(
-            top, text="查看全景", state="disabled", command=self.view_panorama)
-        self.view_button.pack(side="right", padx=(0, 6))
-        self.open_button = ttk.Button(
-            top, text="打开目录", state="disabled", command=self.open_folder)
-        self.open_button.pack(side="right", padx=(0, 6))
-
-        self.preview = tk.Label(
-            self.root, bg="#141414", fg="#bbbbbb",
-            text="正在打开摄像头…", takefocus=True,
-        )
-        self.preview.pack(fill="both", expand=True, padx=14, pady=6)
-        self.preview.bind("<Button-1>", lambda event: self.preview.focus_set())
-
-        bottom = ttk.Frame(self.root, padding=(14, 0, 14, 10))
-        bottom.pack(fill="x")
-        self.status_label = ttk.Label(
-            bottom, textvariable=self.status_var, foreground="#444444")
-        self.status_label.pack(side="left")
-        ttk.Label(bottom, textvariable=self.fps_var,
-                  foreground="#666666").pack(side="right")
+        primary, content = _workspace(
+            self, "区域扫描", "SCAN & STITCH",
+            "C 保存裁剪图  ·  Esc 停止并退出\n"
+            "自动平移涉及底盘运动；停止按钮始终保留在侧栏顶部。")
+        ttk.Label(primary, textvariable=self.mode_var, font=self._bold_font).pack(
+            anchor="w", pady=(0, 8))
+        self.start_button = _action(
+            primary, "开始扫描" if self.settings.mode == "strafe" else "开始录制",
+            self.start_scan, primary=True)
+        self.stop_button = _action(primary, "停止", self.stop_scan,
+                                   danger=True, state="disabled")
+        progress = _section(content, "扫描进度")
         self.progress = ttk.Progressbar(
-            self.root, orient="horizontal", mode="determinate", maximum=100)
-        self.progress.pack(fill="x", padx=14, pady=(0, 8))
-        ttk.Label(self.root, textvariable=self.progress_var,
-                  foreground="#0066aa", padding=(14, 0, 14, 8)).pack(fill="x")
+            progress, orient="horizontal", mode="determinate", maximum=100)
+        self.progress.pack(fill="x", pady=(2, 6))
+        ttk.Label(progress, textvariable=self.progress_var, foreground="#0066aa",
+                  wraplength=225, justify="left").pack(fill="x")
+        results = _section(content, "全景与检测")
+        self.view_button = _action(results, "查看全景", self.view_panorama, state="disabled")
+        self.detect_button = _action(results, "检测全景", self.detect_panorama, state="disabled")
+        self.crop_button = _action(results, "保存裁剪 (C)", self.save_crops, state="disabled")
+        self.open_button = _action(results, "打开目录", self.open_folder, state="disabled")
+        details = _section(content, "本次设置")
+        ttk.Label(details, text=self.settings.summary(), style="Capture.Muted.TLabel",
+                  wraplength=225, justify="left").pack(anchor="w")
 
     def _bind_keys(self) -> None:
         self.root.bind("<KeyPress-c>", self._on_key_c)
@@ -2093,7 +2287,7 @@ class ScanApp(object):
                     fill=(0, 0, 0))
                 draw.text((19, 19 - bbox[1]), header, font=font,
                           fill=(255, 255, 255))
-            photo = ImageTk.PhotoImage(image)
+            photo = self.preview.fit_image(image)
         except Exception:
             return
         self._photo = photo
@@ -2408,6 +2602,7 @@ class GaugeSettingsDialog(tk.Toplevel if TK_AVAILABLE else object):
         if not GAUGE_MODULE_AVAILABLE:
             raise RuntimeError("gauge 模块不可用")
         super().__init__(parent)
+        _setup_gui_theme(self)
         self.result = None
         self.title(title)
         self.resizable(False, False)
@@ -2434,8 +2629,7 @@ class GaugeSettingsDialog(tk.Toplevel if TK_AVAILABLE else object):
         }.get(getattr(defaults, "pointer", "radon"), "Radon（推荐）"))
         self.error_var = tk.StringVar(value="")
 
-        body = ttk.Frame(self, padding=(22, 16))
-        body.pack(fill="both", expand=True)
+        body = _dialog_body(self, self.title(), padding=(20, 12))
         body.columnconfigure(1, weight=1)
 
         ttk.Label(body, text="仪表识别设置", font=self._title_font).grid(
@@ -2489,7 +2683,8 @@ class GaugeSettingsDialog(tk.Toplevel if TK_AVAILABLE else object):
         buttons = ttk.Frame(body)
         buttons.grid(row=row, column=0, columnspan=4, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="取消", command=self._cancel).pack(side="right")
-        ttk.Button(buttons, text="开始识别", command=self._ok).pack(
+        ttk.Button(buttons, text="开始识别", command=self._ok,
+                   style="Capture.Accent.TButton").pack(
             side="right", padx=(0, 8))
 
         self.update_idletasks()
@@ -2604,40 +2799,23 @@ class GaugeApp(object):
         return self.output_root / "仪表识别" / stem
 
     def _build_ui(self) -> None:
-        top = ttk.Frame(self.root, padding=(14, 12, 14, 4))
-        top.pack(fill="x")
-        ttk.Label(top, text="模型：").pack(side="left")
-        ttk.Label(top, textvariable=self.model_var,
-                  font=self._bold_font).pack(side="left")
-        ttk.Button(top, text="更换模型 (M)",
-                   command=self.change_model).pack(side="left", padx=(8, 0))
-        ttk.Label(top, textvariable=self.infer_var).pack(side="left", padx=(14, 0))
-        ttk.Label(top, textvariable=self.det_var).pack(side="left", padx=(10, 0))
-        ttk.Button(top, text="保存当前帧 (S)",
-                   command=self.save_snapshot).pack(side="right")
-        ttk.Button(top, text="保存读数 (R)",
-                   command=self.save_readings).pack(side="right", padx=(0, 6))
-        ttk.Button(top, text="重新标定 (T)",
-                   command=self.recalibrate).pack(side="right", padx=(0, 6))
-
-        self.preview = tk.Label(
-            self.root, bg="#141414", fg="#bbbbbb",
-            text="正在打开摄像头…", takefocus=True,
-        )
-        self.preview.pack(fill="both", expand=True, padx=14, pady=6)
-        self.preview.bind("<Button-1>", lambda event: self.preview.focus_set())
-
-        bottom = ttk.Frame(self.root, padding=(14, 0, 14, 10))
-        bottom.pack(fill="x")
-        self.status_label = ttk.Label(
-            bottom, textvariable=self.status_var, foreground="#444444")
-        self.status_label.pack(side="left")
-        ttk.Label(bottom, textvariable=self.fps_var,
-                  foreground="#666666").pack(side="right")
-        ttk.Button(bottom, text="打开记录目录",
-                   command=self.open_folder).pack(side="right", padx=(0, 8))
-        ttk.Button(bottom, text="正视化 (V)",
-                   command=self.show_rectified).pack(side="right", padx=(0, 8))
+        primary, content = _workspace(
+            self, "仪表识别", "GAUGE READER",
+            "M 更换模型  ·  S 保存帧  ·  R 保存读数\n"
+            "T 重新标定  ·  V 正视化  ·  Esc 退出；输入框内不抢快捷键。")
+        _action(primary, "保存读数 (R)", self.save_readings, primary=True)
+        _action(primary, "保存当前帧 (S)", self.save_snapshot)
+        stats = _section(content, "实时信息")
+        ttk.Label(stats, textvariable=self.infer_var).pack(anchor="w")
+        ttk.Label(stats, textvariable=self.det_var).pack(anchor="w", pady=(3, 0))
+        tools = _section(content, "标定与查看")
+        _action(tools, "正视化 (V)", self.show_rectified)
+        _action(tools, "重新标定 (T)", self.recalibrate)
+        _action(tools, "打开记录目录", self.open_folder)
+        settings = _section(content, "模型设置")
+        ttk.Label(settings, textvariable=self.model_var, font=self._bold_font,
+                  wraplength=230).pack(anchor="w", pady=(0, 6))
+        _action(settings, "更换模型 (M)", self.change_model)
 
     def _bind_keys(self) -> None:
         self.root.bind("<KeyPress-m>", self._on_key_m)
@@ -2804,7 +2982,7 @@ class GaugeApp(object):
         try:
             image = Image.fromarray(cv2.cvtColor(display, cv2.COLOR_BGR2RGB))
             image = self._annotate(image, readings, scale, infer_ms)
-            photo = ImageTk.PhotoImage(image)
+            photo = self.preview.fit_image(image)
         except Exception:
             return
         self._photo = photo

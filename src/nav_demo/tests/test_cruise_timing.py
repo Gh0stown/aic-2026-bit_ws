@@ -150,6 +150,7 @@ class IntegrationTests(unittest.TestCase):
         app._draw_highlight = Mock()
         app.dwell_var = Mock(get=lambda: '1')
         app.speed_var = Mock(get=lambda: '0.1')
+        app.route_var = Mock(get=lambda: 'left')  # 适配现有路线优化开关，不更改巡航逻辑。
         app.teleop_keys = {}
         app._teleop_zero = Mock()  # 禁止测试触及实际底盘发布器。
         app._teleop_active = False

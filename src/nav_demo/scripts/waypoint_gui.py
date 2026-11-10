@@ -125,99 +125,383 @@ class WaypointGui(object):
     # ---------- 界面 ----------
     def _setup_fonts(self):
         families = set(tkfont.families())
+        family = tkfont.nametofont('TkDefaultFont').actual('family')
         for name in ('Noto Sans CJK SC', 'Noto Sans CJK JP', 'WenQuanYi Micro Hei',
                      'Source Han Sans SC'):
             if name in families:
-                for key in ('TkDefaultFont', 'TkTextFont', 'TkMenuFont', 'TkHeadingFont'):
-                    tkfont.nametofont(key).configure(family=name, size=10)
+                family = name
                 break
-        self.font_family = tkfont.nametofont('TkDefaultFont').actual('family')
+        for key in ('TkDefaultFont', 'TkTextFont', 'TkMenuFont', 'TkHeadingFont'):
+            tkfont.nametofont(key).configure(family=family, size=10)
+        self.font_family = family
+        self.colors = {'bg': '#edf2f6', 'ink': '#203247', 'muted': '#687b8e',
+                       'line': '#dbe4ec', 'accent': '#087f8c', 'navy': '#172b40'}
+        c = self.colors
+        style = ttk.Style(self.root)
+        style.theme_use('clam')
+        style.configure('.', font=(family, 10), foreground=c['ink'], background=c['bg'])
+        style.configure('TFrame', background=c['bg'])
+        style.configure('Card.TFrame', background='white')
+        style.configure('TLabel', background='white')
+        style.configure('Muted.TLabel', foreground=c['muted'])
+        style.configure('Section.TLabel', font=(family, 11, 'bold'))
+        style.configure('TButton', padding=(10, 5), background='#f1f5f9',
+                        bordercolor=c['line'], focuscolor=c['accent'])
+        style.map('TButton', background=[('active', '#e3edf4')],
+                  foreground=[('disabled', '#9ba9b6')])
+        style.configure('Accent.TButton', background=c['accent'], foreground='white',
+                        bordercolor=c['accent'], font=(family, 11, 'bold'), padding=(12, 9))
+        style.map('Accent.TButton', background=[('active', '#066b77')])
+        style.configure('Danger.TButton', foreground='#b83d4c')
+        style.configure('TEntry', padding=5, fieldbackground='white', bordercolor=c['line'])
+        style.configure('TCheckbutton', background='white', padding=4)
+        style.map('TCheckbutton', background=[('active', 'white')])
+        style.configure('Treeview', background='white', fieldbackground='white',
+                        rowheight=32, borderwidth=0)
+        style.configure('Treeview.Heading', background='#edf3f7', foreground=c['muted'],
+                        font=(family, 9, 'bold'), padding=(5, 7))
+        style.map('Treeview', background=[('selected', '#cce9ec')],
+                  foreground=[('selected', '#075b65')])
+        style.configure('Horizontal.TProgressbar', background=c['accent'],
+                        troughcolor='#e7eef3', borderwidth=0, thickness=5)
+        style.configure('TSeparator', background=c['line'])
 
     def _build_ui(self):
-        self.root.title('巡检点位记录')
-        self.root.resizable(False, False)
+        c = self.colors
+        self.root.title('巡检点位记录 · 点位工作台')
+        width = min(1320, self.root.winfo_screenwidth() - 60)
+        height = min(900, self.root.winfo_screenheight() - 90)
+        self.root.geometry('%dx%d' % (width, height))
+        self.root.minsize(1100, 760)
+        self.root.resizable(True, True)
+        self.root.configure(background=c['bg'])
+        self.view_zoom = 1.0
+        self.view_pan_x = self.view_pan_y = 0.0
+        self.map_offset_x = self.map_offset_y = 0.0
+        self._map_resize_job = None
+        self._hidden_rows = set()
+        self._map_drag = None
 
-        left = ttk.Frame(self.root, padding=6)
-        left.grid(row=0, column=0, sticky='ns')
-        right = ttk.Frame(self.root, padding=6)
-        right.grid(row=0, column=1, sticky='nsew')
+        header = tk.Frame(self.root, background=c['navy'], padx=20, pady=12)
+        header.pack(fill='x')
+        tk.Label(header, text='巡检点位记录', background=c['navy'], foreground='white',
+                 font=(self.font_family, 19, 'bold')).pack(side='left')
+        tk.Label(header, text=' /  WAYPOINT STUDIO', background=c['navy'],
+                 foreground='#9fb5c9', font=(self.font_family, 9)).pack(side='left', padx=12)
+        self.connection_var = tk.StringVar(value='等待定位')
+        self.connection_badge = tk.Label(header, textvariable=self.connection_var,
+                                         background='#294357', foreground='#dbe8f2',
+                                         font=(self.font_family, 10, 'bold'), padx=12, pady=4)
+        self.connection_badge.pack(side='right')
 
-        # --- 左侧点位表 ---
-        cols = ('status', 'id', 'name', 'note')
-        self.tree = ttk.Treeview(left, columns=cols, show='headings', height=20,
+        footer = ttk.Frame(self.root, style='Card.TFrame', padding=(16, 8))
+        footer.pack(side='bottom', fill='x', padx=14, pady=(0, 12))
+        self.status_var = tk.StringVar()
+        ttk.Label(footer, textvariable=self.status_var, style='Muted.TLabel').pack(anchor='w')
+        self.output_label = ttk.Label(footer, text='保存位置：' + self.output,
+                                      style='Muted.TLabel', font=(self.font_family, 9))
+        self.output_label.pack(anchor='w', fill='x')
+        footer.bind('<Configure>', lambda e: self.output_label.configure(wraplength=e.width - 32))
+
+        body = ttk.Panedwindow(self.root, orient='horizontal')
+        body.pack(fill='both', expand=True, padx=14, pady=12)
+        left = ttk.Frame(body, style='Card.TFrame', padding=14)
+        right = ttk.Frame(body, style='Card.TFrame', padding=14)
+        body.add(left, weight=5)
+        body.add(right, weight=6)
+        self.root.after_idle(lambda: body.sashpos(0, int(width * 0.46)))
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(3, weight=1)
+
+        list_header = ttk.Frame(left, style='Card.TFrame')
+        list_header.grid(row=0, column=0, sticky='ew')
+        ttk.Label(list_header, text='点位档案', style='Section.TLabel').pack(side='left')
+        self.summary_var = tk.StringVar(value='等待载入')
+        ttk.Label(list_header, textvariable=self.summary_var, style='Muted.TLabel').pack(side='right')
+        self.progress = ttk.Progressbar(left, maximum=max(1, len(self.presets)))
+        self.progress.grid(row=1, column=0, sticky='ew', pady=(8, 10))
+        filters = ttk.Frame(left, style='Card.TFrame')
+        filters.grid(row=2, column=0, sticky='ew', pady=(0, 10))
+        filters.columnconfigure(1, weight=1)
+        ttk.Label(filters, text='查找', style='Muted.TLabel').grid(row=0, column=0, padx=(0, 8))
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(filters, textvariable=self.search_var, width=16)
+        self.search_entry.grid(row=0, column=1, sticky='ew')
+        self.missing_only_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(filters, text='仅看未记录', variable=self.missing_only_var,
+                        command=self._apply_filter).grid(row=0, column=2, padx=(8, 0))
+        self.search_var.trace_add('write', lambda *_: self._apply_filter())
+
+        table = ttk.Frame(left, style='Card.TFrame')
+        table.grid(row=3, column=0, sticky='nsew')
+        table.rowconfigure(0, weight=1)
+        table.columnconfigure(0, weight=1)
+        cols = ('status', 'id', 'name', 'tasks', 'note')
+        self.tree = ttk.Treeview(table, columns=cols, show='headings', height=7,
                                  selectmode='browse')
-        for col, text, width, anchor in (
-                ('status', '状态', 40, 'center'),
-                ('id', '序号', 40, 'center'),
-                ('name', '点位名称', 205, 'w'),
-                ('note', '备注', 170, 'w')):
+        for col, text, col_width, minimum, anchor in (
+                ('status', '状态', 60, 58, 'center'), ('id', 'ID', 40, 36, 'center'),
+                ('name', '点位名称', 166, 120, 'w'), ('tasks', '识别朝向', 94, 90, 'w'),
+                ('note', '备注', 160, 120, 'w')):
             self.tree.heading(col, text=text)
-            self.tree.column(col, width=width, anchor=anchor, stretch=False)
-        sb = ttk.Scrollbar(left, orient='vertical', command=self.tree.yview)
-        self.tree.configure(yscrollcommand=sb.set)
-        self.tree.grid(row=0, column=0, columnspan=2, sticky='nsew')
+            self.tree.column(col, width=col_width, minwidth=minimum, anchor=anchor,
+                             stretch=col in ('name', 'note'))
+        self.tree.grid(row=0, column=0, sticky='nsew')
+        sb = ttk.Scrollbar(table, orient='vertical', command=self.tree.yview)
         sb.grid(row=0, column=1, sticky='ns')
+        hsb = ttk.Scrollbar(table, orient='horizontal', command=self.tree.xview)
+        hsb.grid(row=1, column=0, sticky='ew')
+        self.tree.configure(yscrollcommand=sb.set, xscrollcommand=hsb.set)
+        self.tree.tag_configure('recorded', background='#f0f8f8', foreground='#176772')
+        self.tree.tag_configure('missing', background='#fff8ed', foreground='#8b5d27')
         self.tree.bind('<Double-1>', lambda e: self.record_selected())
         self.tree.bind('<<TreeviewSelect>>', self._on_select)
 
-        self.detail_var = tk.StringVar()
-        ttk.Label(left, textvariable=self.detail_var, wraplength=455,
-                  foreground='#333').grid(row=1, column=0, columnspan=2,
-                                          sticky='w', pady=(4, 6))
+        selection = ttk.Frame(left, style='Card.TFrame')
+        selection.grid(row=4, column=0, sticky='ew', pady=(10, 8))
+        ttk.Label(selection, text='当前选中', style='Section.TLabel').pack(anchor='w')
+        self.detail_var = tk.StringVar(value='选择左侧点位，或点击地图中的已记录点')
+        self.detail_label = ttk.Label(selection, textvariable=self.detail_var,
+                                      wraplength=480, justify='left')
+        self.detail_label.pack(fill='x', pady=(4, 2))
+        self.task_detail_var = tk.StringVar(value='识别任务：只读展示，不会修改任务朝向')
+        self.task_label = ttk.Label(selection, textvariable=self.task_detail_var,
+                                    style='Muted.TLabel', wraplength=480, justify='left')
+        self.task_label.pack(fill='x')
+        selection.bind('<Configure>', lambda e: self._wrap_details(e.width))
 
-        ttk.Button(left, text='记录当前位姿（到选中点位）',
-                   command=self.record_selected).grid(
-            row=2, column=0, columnspan=2, sticky='ew', pady=(4, 2))
-        ttk.Button(left, text='清除选中点位坐标', command=self.clear_selected).grid(
-            row=3, column=0, columnspan=2, sticky='ew', pady=2)
-
-        custom = ttk.LabelFrame(left, text='预设里没有的点位', padding=4)
-        custom.grid(row=4, column=0, columnspan=2, sticky='ew', pady=(10, 0))
-        self.custom_var = tk.StringVar()
-        entry = ttk.Entry(custom, textvariable=self.custom_var, width=30)
-        entry.grid(row=0, column=0, sticky='ew', padx=(0, 4))
-        ttk.Button(custom, text='添加并记录', command=self.add_custom).grid(
-            row=0, column=1)
+        actions = ttk.Frame(left, style='Card.TFrame')
+        actions.grid(row=5, column=0, sticky='ew')
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
+        self.record_btn = ttk.Button(actions, text='记录当前位姿 → 选中点位',
+                                      command=self.record_selected, style='Accent.TButton')
+        self.record_btn.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 7))
+        self.next_btn = ttk.Button(actions, text='选择下一个未记录点', command=self._select_next_missing)
+        self.next_btn.grid(row=1, column=0, sticky='ew', padx=(0, 6))
+        self.clear_btn = ttk.Button(actions, text='清除选中坐标…', command=self.clear_selected,
+                                     style='Danger.TButton')
+        self.clear_btn.grid(row=1, column=1, sticky='ew')
+        custom = ttk.Frame(left, style='Card.TFrame')
+        custom.grid(row=6, column=0, sticky='ew', pady=(10, 0))
         custom.columnconfigure(0, weight=1)
+        ttk.Label(custom, text='自定义点位', style='Muted.TLabel').grid(
+            row=0, column=0, columnspan=2, sticky='w', pady=(0, 4))
+        self.custom_var = tk.StringVar()
+        self.custom_entry = ttk.Entry(custom, textvariable=self.custom_var, width=24)
+        self.custom_entry.grid(row=1, column=0, sticky='ew', padx=(0, 7))
+        self.add_btn = ttk.Button(custom, text='添加并记录', command=self.add_custom)
+        self.add_btn.grid(row=1, column=1, sticky='ew')
 
-        self.status_var = tk.StringVar()
-        ttk.Label(left, textvariable=self.status_var, foreground='#555').grid(
-            row=5, column=0, columnspan=2, sticky='w', pady=(8, 0))
-
-        # --- 右侧地图 ---
-        self.scale = min(CANVAS_MAX_W / self.map_img.width,
-                         CANVAS_MAX_H / self.map_img.height)
-        disp = self.map_img.resize(
-            (int(self.map_img.width * self.scale),
-             int(self.map_img.height * self.scale)), Image.NEAREST)
-        self.photo = ImageTk.PhotoImage(disp)
-        self.canvas = tk.Canvas(right, width=disp.width, height=disp.height,
-                                highlightthickness=1, highlightbackground='#555')
-        self.canvas.pack()
-        self.canvas.create_image(0, 0, anchor='nw', image=self.photo)
-
+        map_header = ttk.Frame(right, style='Card.TFrame')
+        map_header.pack(fill='x', pady=(0, 8))
+        ttk.Label(map_header, text='场地地图', style='Section.TLabel').pack(side='left')
+        self.zoom_var = tk.StringVar(value='100%')
+        ttk.Button(map_header, text='适应窗口', command=self._fit_map).pack(side='right')
+        ttk.Button(map_header, text='＋', width=3, command=lambda: self._zoom_map(1.25)).pack(
+            side='right', padx=4)
+        ttk.Label(map_header, textvariable=self.zoom_var, style='Muted.TLabel').pack(side='right')
+        ttk.Button(map_header, text='−', width=3, command=lambda: self._zoom_map(0.8)).pack(
+            side='right', padx=4)
+        map_footer = ttk.Frame(right, style='Card.TFrame')
+        map_footer.pack(side='bottom', fill='x')
         self.pose_var = tk.StringVar(value='等待 map -> base_footprint ...')
-        ttk.Label(right, textvariable=self.pose_var, font=(self.font_family, 10)).pack(
-            anchor='w', pady=(6, 2))
-        ttk.Label(right, text='绿色点 = 已记录；红色箭头 = 小车当前位姿',
-                  foreground='#555').pack(anchor='w')
-
-        # --- 底部状态 ---
+        self.pose_label = ttk.Label(map_footer, textvariable=self.pose_var,
+                                    wraplength=500, font=(self.font_family, 10))
+        self.pose_label.pack(anchor='w', fill='x', pady=(10, 8))
+        ttk.Separator(map_footer).pack(fill='x', pady=(0, 8))
+        ttk.Label(map_footer, text='● 已记录点位    ◯ 当前选中    ▲ 机器人',
+                  style='Muted.TLabel').pack(anchor='w')
+        ttk.Label(map_footer, text='滚轮缩放 · 拖动平移 · 单击点位联动列表',
+                  style='Muted.TLabel', font=(self.font_family, 9)).pack(anchor='w', pady=(3, 0))
+        ttk.Label(map_footer, text='地图操作只改变视图，不写入坐标；记录仍取实时 TF。',
+                  style='Muted.TLabel', font=(self.font_family, 9)).pack(anchor='w', pady=(3, 0))
+        map_footer.bind('<Configure>', lambda e: self.pose_label.configure(wraplength=e.width))
+        self.canvas = tk.Canvas(right, width=CANVAS_MAX_W, height=CANVAS_MAX_H,
+                                background='#f4f7fa', highlightthickness=0, cursor='hand2')
+        self.canvas.pack(fill='both', expand=True)
+        self.canvas.bind('<Configure>', self._on_map_resize)
+        self.canvas.bind('<ButtonPress-1>', self._start_map_drag)
+        self.canvas.bind('<B1-Motion>', self._drag_map)
+        self.canvas.bind('<ButtonRelease-1>', self._end_map_drag)
+        self.canvas.bind('<Button-4>', lambda e: self._zoom_map(1.25, e.x, e.y))
+        self.canvas.bind('<Button-5>', lambda e: self._zoom_map(0.8, e.x, e.y))
+        self.canvas.bind('<MouseWheel>', lambda e: self._zoom_map(
+            1.25 if e.delta > 0 else 0.8, e.x, e.y) if e.delta else None)
+        self._render_map()
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
+
+    def _wrap_details(self, width):
+        for label in (self.detail_label, self.task_label):
+            label.configure(wraplength=max(160, width))
+
+    def _task_text(self, pid, names=False):
+        tasks = self.recorded.get(pid, {}).get('tasks') or []
+        return ' / '.join(('%s ' % task.get('name', '') if names else '') +
+                          ('%.0f°' % math.degrees(float(task.get('yaw', 0.0))))
+                          for task in tasks) or '—'
+
+    def _apply_filter(self):
+        query = self.search_var.get().strip().casefold()
+        ids = self.preset_ids + [pid for pid in sorted(self.recorded) if pid not in self.preset_by_id]
+        for pid in ids:
+            iid = str(pid)
+            if not self.tree.exists(iid):
+                continue
+            values = self.tree.item(iid, 'values')
+            matches = (not query or query in ' '.join(str(v) for v in values).casefold())
+            matches = matches and (not self.missing_only_var.get() or pid not in self.recorded)
+            if matches:
+                self.tree.move(iid, '', 'end')
+                self._hidden_rows.discard(iid)
+            else:
+                if iid in self.tree.selection():
+                    self.tree.selection_remove(iid)
+                self.tree.detach(iid)
+                self._hidden_rows.add(iid)
+        self._on_select()
+
+    def _select_next_missing(self):
+        missing = [pid for pid in self.preset_ids if pid not in self.recorded]
+        if not missing:
+            messagebox.showinfo('点位已齐全', '所有预设点位都已记录。')
+            return
+        selected = self.tree.selection()
+        current = int(selected[0]) if selected else None
+        start = self.preset_ids.index(current) + 1 if current in self.preset_ids else 0
+        candidates = self.preset_ids[start:] + self.preset_ids[:start]
+        pid = next(pid for pid in candidates if pid in missing)
+        self.search_var.set('')
+        self.missing_only_var.set(False)
+        self._apply_filter()
+        self.tree.selection_set(str(pid))
+        self.tree.focus(str(pid))
+        self.tree.see(str(pid))
+        self._on_select()
+
+    def _on_map_resize(self, _event):
+        if self._map_resize_job is not None:
+            self.root.after_cancel(self._map_resize_job)
+        self._map_resize_job = self.root.after(80, self._resize_map)
+
+    def _resize_map(self):
+        self._map_resize_job = None
+        self._render_map()
+
+    def _map_transform(self):
+        width = max(1, self.canvas.winfo_width())
+        height = max(1, self.canvas.winfo_height())
+        if width <= 1 or height <= 1:
+            width, height = CANVAS_MAX_W, CANVAS_MAX_H
+        self.scale = min(max(1, width - 40) / self.map_img.width,
+                         max(1, height - 40) / self.map_img.height) * self.view_zoom
+        self.map_offset_x = (width - self.map_img.width * self.scale) / 2 + self.view_pan_x
+        self.map_offset_y = (height - self.map_img.height * self.scale) / 2 + self.view_pan_y
+
+    def _render_map(self):
+        self._map_transform()
+        disp = self.map_img.resize((max(1, int(self.map_img.width * self.scale)),
+                                    max(1, int(self.map_img.height * self.scale))), Image.NEAREST)
+        self.photo = ImageTk.PhotoImage(disp, master=self.root)
+        self.canvas.delete('all')
+        self.canvas.create_image(self.map_offset_x, self.map_offset_y,
+                                 anchor='nw', image=self.photo, tags='map')
+        self.arrow = None
+        self.zoom_var.set('%d%%' % round(self.view_zoom * 100))
+        self._draw_map()
+        pose, ok = self.pose_source.get()
+        if ok and pose is not None:
+            self._draw_arrow(*pose)
+
+    def _fit_map(self):
+        self.view_zoom = 1.0
+        self.view_pan_x = self.view_pan_y = 0.0
+        self._render_map()
+
+    def _zoom_map(self, factor, cx=None, cy=None):
+        cx = self.canvas.winfo_width() / 2 if cx is None else cx
+        cy = self.canvas.winfo_height() / 2 if cy is None else cy
+        world = self.canvas_to_world(cx, cy)
+        self.view_zoom = max(0.5, min(5.0, self.view_zoom * factor))
+        self._map_transform()
+        nx, ny = self.world_to_canvas(*world)
+        self.view_pan_x += cx - nx
+        self.view_pan_y += cy - ny
+        self._render_map()
+        return 'break'
+
+    def _start_map_drag(self, event):
+        self._map_drag = (event.x, event.y, event.x, event.y, False)
+
+    def _drag_map(self, event):
+        if self._map_drag is None:
+            return
+        sx, sy, px, py, moved = self._map_drag
+        moved = moved or math.hypot(event.x - sx, event.y - sy) > 4
+        if moved:
+            dx, dy = event.x - px, event.y - py
+            self.view_pan_x += dx
+            self.view_pan_y += dy
+            self.map_offset_x += dx
+            self.map_offset_y += dy
+            self.canvas.move('all', dx, dy)
+        self._map_drag = (sx, sy, event.x, event.y, moved)
+
+    def _end_map_drag(self, event):
+        if self._map_drag is not None and not self._map_drag[4]:
+            self._select_map_point(event.x, event.y)
+        self._map_drag = None
+
+    def _select_map_point(self, cx, cy):
+        candidates = []
+        # 编号文字优先命中，便于选择坐标重合、但标签已错开的点位。
+        for pid, (_oval, label) in self.pose_items.items():
+            box = self.canvas.bbox(label)
+            if box and box[0] <= cx <= box[2] and box[1] <= cy <= box[3]:
+                candidates.append((-1, pid))
+        for pid, entry in self.recorded.items():
+            if 'x' in entry and 'y' in entry:
+                px, py = self.world_to_canvas(entry['x'], entry['y'])
+                distance = math.hypot(cx - px, cy - py)
+                if distance <= 18:
+                    candidates.append((distance, pid))
+        if not candidates:
+            return
+        pid = min(candidates)[1]
+        self.search_var.set('')
+        self.missing_only_var.set(False)
+        self._apply_filter()
+        self.tree.selection_set(str(pid))
+        self.tree.focus(str(pid))
+        self.tree.see(str(pid))
+        self._on_select()
+
+    def _highlight_selected(self):
+        self.canvas.delete('selected')
+        selection = self.tree.selection()
+        if not selection:
+            return
+        entry = self.recorded.get(int(selection[0]), {})
+        if 'x' not in entry or 'y' not in entry:
+            return
+        px, py = self.world_to_canvas(entry['x'], entry['y'])
+        self.canvas.create_oval(px - 14, py - 14, px + 14, py + 14,
+                                outline='#db8c25', width=3, tags='selected')
 
     def world_to_canvas(self, x, y):
         col = (x - self.ox) / self.res
         row = self.map_img.height - (y - self.oy) / self.res
-        return col * self.scale, row * self.scale
+        return self.map_offset_x + col * self.scale, self.map_offset_y + row * self.scale
 
     def canvas_to_world(self, cx, cy):
-        x = self.ox + (cx / self.scale) * self.res
-        y = self.oy + (self.map_img.height - cy / self.scale) * self.res
+        x = self.ox + ((cx - self.map_offset_x) / self.scale) * self.res
+        y = self.oy + (self.map_img.height - (cy - self.map_offset_y) / self.scale) * self.res
         return x, y
 
     def _draw_map(self):
         self.canvas.delete('points')
         self.pose_items = {}
+        label_boxes = []
         for pid, entry in sorted(self.recorded.items()):
             if 'x' not in entry or 'y' not in entry:
                 continue
@@ -228,12 +512,28 @@ class WaypointGui(object):
             label = self.canvas.create_text(px, py - 14, text=str(pid),
                                             fill='#0a6b0a', tags='points',
                                             font=(self.font_family, 9, 'bold'))
+            # 只错开文字，不移动实际点位；0/19 等同坐标点也能分别看到编号。
+            for dx, dy in ((0, -17), (19, -6), (-19, -6), (0, 19),
+                           (22, -23), (-22, -23), (22, 22), (-22, 22)):
+                self.canvas.coords(label, px + dx, py + dy)
+                box = self.canvas.bbox(label)
+                if not any(box[0] < b[2] + 3 and box[2] > b[0] - 3 and
+                           box[1] < b[3] + 3 and box[3] > b[1] - 3 for b in label_boxes):
+                    break
+            label_boxes.append(box)
             self.pose_items[pid] = (oval, label)
+        self._highlight_selected()
 
     def _on_select(self, _event=None):
         selection = self.tree.selection()
+        if selection and selection[0] in self._hidden_rows:
+            # 记录后原回调会重新选中该项；若它已被“仅看未记录”隐藏，清掉隐形选择。
+            self.tree.selection_remove(selection)
+            selection = ()
         if not selection:
-            self.detail_var.set('')
+            self.detail_var.set('选择左侧点位，或点击地图中的已记录点')
+            self.task_detail_var.set('识别任务：只读展示，不会修改任务朝向')
+            self._highlight_selected()
             return
         pid = int(selection[0])
         if pid in self.preset_by_id:
@@ -253,18 +553,23 @@ class WaypointGui(object):
         else:
             note = (note + '    （未记录）').strip()
         self.detail_var.set('%s：%s' % (name, note))
+        self.task_detail_var.set('识别任务（只读）：' + self._task_text(pid, names=True))
+        self._highlight_selected()
 
     # ---------- 数据 ----------
     def _insert_row(self, pid, name, note, custom=False):
         entry = self.recorded.get(pid)
-        status = '已记' if entry and 'x' in entry else ''
-        values = (status, str(pid), name, note)
-        self.tree.insert('', 'end', iid=str(pid), values=values)
+        status = '● 已录' if entry and 'x' in entry else '○ 待录'
+        values = (status, str(pid), name, self._task_text(pid), note)
+        self.tree.insert('', 'end', iid=str(pid), values=values,
+                         tags=('recorded' if entry and 'x' in entry else 'missing',))
 
     def refresh(self):
         selection = self.tree.selection()
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        for item in set(self.tree.get_children()) | self._hidden_rows:
+            if self.tree.exists(item):
+                self.tree.delete(item)
+        self._hidden_rows.clear()
 
         for p in self.presets:
             note = p.get('note', '') or ''
@@ -289,6 +594,9 @@ class WaypointGui(object):
         done = sum(1 for p in self.presets if int(p['id']) in self.recorded)
         self.status_var.set('已记录 %d / %d 个预设点位   输出：%s'
                             % (done, total, os.path.basename(self.output)))
+        self.summary_var.set('已录 %02d / %02d · 缺失 %d' % (done, total, total - done))
+        self.progress.configure(maximum=max(1, total), value=done)
+        self._apply_filter()
 
     def _save(self):
         out_dir = os.path.dirname(self.output)
@@ -388,8 +696,15 @@ class WaypointGui(object):
             self.pose_var.set('当前位姿  x=%+.3f  y=%+.3f  yaw=%+.4f rad (%+.1f°)'
                               % (pose[0], pose[1], pose[2], math.degrees(pose[2])))
             self._draw_arrow(*pose)
+            self.connection_var.set('定位已连接')
+            self.connection_badge.configure(background='#105c63', foreground='#a2eee1')
         else:
             self.pose_var.set('等待 map -> base_footprint ...')
+            self.connection_var.set('等待定位 · 请检查导航 / TF')
+            self.connection_badge.configure(background='#72501d', foreground='#ffe0a6')
+            if self.arrow is not None:
+                self.canvas.delete(self.arrow)
+                self.arrow = None
         self.root.after(100, self._tick)
 
     def _draw_arrow(self, x, y, yaw):
