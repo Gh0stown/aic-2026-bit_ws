@@ -1,0 +1,29 @@
+<launch>
+  <!-- Deterministic offline input; no serial dependency or port argument needed. -->
+  <arg name="capture_file" default="$(find mlx90640_ros)/test/data/capture.bin" />
+  <arg name="library_path" default="" />
+  <arg name="emissivity" default="0.95" />
+  <arg name="tr_shift" default="8" />
+  <arg name="bad_pixels" default="false" />
+  <arg name="scale" default="12" />
+  <arg name="tmin" default="" />
+  <arg name="tmax" default="" />
+  <arg name="frame_id" default="mlx90640_link" />
+  <arg name="loop" default="false" />
+  <arg name="replay_rate" default="2" />
+
+  <include file="$(find mlx90640_ros)/launch/mlx90640.launch">
+    <arg name="port" value="" />
+    <arg name="capture_file" value="$(arg capture_file)" />
+    <arg name="library_path" value="$(arg library_path)" />
+    <arg name="emissivity" value="$(arg emissivity)" />
+    <arg name="tr_shift" value="$(arg tr_shift)" />
+    <arg name="bad_pixels" value="$(arg bad_pixels)" />
+    <arg name="scale" value="$(arg scale)" />
+    <arg name="tmin" value="$(arg tmin)" />
+    <arg name="tmax" value="$(arg tmax)" />
+    <arg name="frame_id" value="$(arg frame_id)" />
+    <arg name="loop" value="$(arg loop)" />
+    <arg name="replay_rate" value="$(arg replay_rate)" />
+  </include>
+</launch>

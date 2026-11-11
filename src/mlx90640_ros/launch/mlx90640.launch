@@ -1,0 +1,34 @@
+<launch>
+  <!-- Explicit port is mandatory. This launch never probes hardware. -->
+  <arg name="port" />
+  <arg name="baud" default="460800" />
+  <arg name="library_path" default="" />
+  <arg name="emissivity" default="0.95" />
+  <arg name="tr_shift" default="8" />
+  <arg name="bad_pixels" default="false" />
+  <arg name="scale" default="12" />
+  <arg name="tmin" default="" />
+  <arg name="tmax" default="" />
+  <arg name="frame_id" default="mlx90640_link" />
+  <arg name="capture_file" default="" />
+  <arg name="loop" default="false" />
+  <arg name="replay_rate" default="2" />
+
+  <group ns="mlx90640">
+    <node pkg="mlx90640_ros" type="mlx90640_node.py" name="mlx90640_node" output="screen">
+      <param name="port" value="$(arg port)" type="str" />
+      <param name="baud" value="$(arg baud)" type="int" />
+      <param name="library_path" value="$(arg library_path)" type="str" />
+      <param name="emissivity" value="$(arg emissivity)" type="double" />
+      <param name="tr_shift" value="$(arg tr_shift)" type="double" />
+      <param name="bad_pixels" value="$(arg bad_pixels)" type="bool" />
+      <param name="scale" value="$(arg scale)" type="int" />
+      <param name="tmin" value="$(arg tmin)" type="str" />
+      <param name="tmax" value="$(arg tmax)" type="str" />
+      <param name="frame_id" value="$(arg frame_id)" type="str" />
+      <param name="capture_file" value="$(arg capture_file)" type="str" />
+      <param name="loop" value="$(arg loop)" type="bool" />
+      <param name="replay_rate" value="$(arg replay_rate)" type="double" />
+    </node>
+  </group>
+</launch>

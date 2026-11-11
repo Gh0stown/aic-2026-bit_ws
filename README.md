@@ -133,6 +133,23 @@ docs/                                设计记录
 
 > 仪表识别**未完成**，读数还在调，暂不参与比赛流程。
 
+## ESP32 红外测温（MLX90640）
+
+独立测温包，不自动加入导航、不占用底盘串口；仅接入 ESP32-S3，不包含其他 MCU 工程。
+
+```bash
+catkin_make --pkg mlx90640_ros -j2
+source devel/setup.bash
+# 无硬件回放：需先启动 roscore
+roslaunch mlx90640_ros replay.launch loop:=true
+# 实机：替换为确认属于 ESP32 UART USB-C 的设备，不能照搬其他传感器端口
+roslaunch mlx90640_ros mlx90640.launch port:=/dev/serial/by-id/你的ESP32设备
+```
+
+发布 32×24 摄氏度矩阵、伪彩热图和环境温度；约 2Hz 子页合成为约 1Hz 完整图。
+[模块说明](<src/mlx90640_ros/README.md>) · [ESP32 接线与烧录](<firmware/mlx90640/MLX90640_ESP32S3/README.md>)。
+楼层识别、巡航触发与裁判上传尚未接入。
+
 ## 已知问题 / 注意
 
 - 手柄是底盘自带的 PS2 接收器，不经过 ROS。用过手柄后要执行
