@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>模拟裁判台 · 非官方评分</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div><p class="eyebrow">MOCK JUDGE / 联调工具</p><h1>模拟裁判台</h1><p class="warning">仅用于协议联调与记录查看 · 非官方裁判 / 不计算分数</p></div>
+    <div class="connection"><span id="connection-dot" class="dot"></span><strong id="connection-label" role="status">正在连接…</strong><small id="last-sync">尚未同步</small></div>
+  </header>
+  <main>
+    <noscript><p class="notice error">此仪表台需要启用 JavaScript。</p></noscript>
+    <p id="network-error" class="notice error" role="alert" hidden></p>
+    <section class="session-panel" aria-label="当前场次状态">
+      <div><span class="field-label">当前场次</span><strong id="current-session">—</strong><span id="session-status" class="badge">等待同步</span><small id="session-created">—</small></div>
+      <div><span class="field-label">手动计时</span><strong id="elapsed" class="timer">00:00:00</strong><small>仅「开始」后计时，结束后冻结；hello / 上报不启动计时</small></div>
+      <div><span class="field-label">当前锁定队伍</span><strong id="locked-team">—</strong><small id="session-times">—</small></div>
+    </section>
+    <section class="toolbar" aria-label="记录筛选">
+      <label>查看场次<select id="session-filter"><option value="current">当前场次</option></select></label>
+      <label>队伍<select id="team-filter"><option value="">全部队伍</option></select></label>
+      <label>任务<select id="task-filter"><option value="">全部任务</option></select></label>
+      <form id="point-form" class="point-form"><label>点位 / sub_id<input id="point-filter" type="search" placeholder="精确点位，留空为全部" maxlength="128"></label><button type="submit" class="secondary">筛选</button></form>
+      <div class="view-switch" role="group" aria-label="记录视图"><button id="latest-mode" type="button" aria-pressed="true">最新</button><button id="history-mode" type="button" class="secondary" aria-pressed="false">历史</button></div>
+    </section>
+    <div class="section-heading"><div><h2>任务上报</h2><p id="view-description">最新：每个队伍 / 任务 / 点位的最后一次上报。</p></div><span id="report-summary" role="status">正在加载…</span></div>
+    <p id="report-error" class="notice error" role="alert" hidden></p>
+    <div id="task-grid" class="task-grid"></div>
+    <nav id="pagination" class="pagination" aria-label="历史分页" hidden><button id="previous-page" type="button" class="secondary">上一页</button><span id="page-summary"></span><button id="next-page" type="button" class="secondary">下一页</button></nav>
+    <details class="team-panel"><summary>队伍通信状态 <span id="team-count"></span></summary><p class="muted">通信时间不参与计时；这里显示所选场次全部队伍，不受队伍 / 任务筛选影响。</p><div class="table-wrap"><table><thead><tr><th>队伍</th><th>最近 hello</th><th>最近上报</th><th>上报数</th></tr></thead><tbody id="team-table"></tbody></table></div></details>
+    <section class="admin-panel" aria-labelledby="admin-title"><div class="section-heading"><div><h2 id="admin-title">模拟管理</h2><p>管理操作作用于当前场次；计时中须先结束才能新建。导出作用于上方选择的场次。</p></div></div>
+      <form id="token-form" autocomplete="off"><label>管理令牌<input id="admin-token" type="password" autocomplete="off" spellcheck="false" placeholder="仅保存在本页内存，刷新即清除"></label><button id="clear-token" type="button" class="secondary">清除令牌</button></form>
+      <form id="lock-form" class="lock-form"><label>选择当前队伍<select id="lock-team-select"><option value="">选择队伍或在右侧输入</option></select></label><label>锁定队名<input id="lock-team-input" type="text" maxlength="128" placeholder="可输入尚未出现的队伍" autocomplete="off"></label><button type="submit" data-admin>锁定队伍</button><button id="unlock-team" type="button" class="secondary" data-admin>解锁</button></form>
+      <div class="admin-actions"><button id="start-session" type="button" data-admin>开始计时</button><button id="finish-session" type="button" class="danger" data-admin>结束场次</button><button id="new-session" type="button" class="secondary" data-admin>新建场次</button><button id="export-session" type="button" class="secondary" data-admin>导出所选场次 ZIP</button></div>
+      <p id="admin-message" class="notice" role="status" hidden></p>
+    </section>
+    <footer>独立模拟服务 · 图片公开读取，管理接口使用 Bearer 令牌 · 建议仅在可信局域网使用</footer>
+  </main>
+  <dialog id="image-dialog" aria-labelledby="image-title"><div class="dialog-toolbar"><h2 id="image-title">上报图片</h2><button id="close-image" type="button" class="secondary">关闭</button></div><div class="image-stage"><img id="large-image" alt=""><p id="image-error" class="notice error" hidden>图片加载失败，请检查连接或稍后重试。</p></div><div class="gallery-controls"><button id="previous-image" type="button" class="secondary" aria-label="上一张图片">← 上一张</button><span id="image-position"></span><button id="next-image" type="button" class="secondary" aria-label="下一张图片">下一张 →</button></div><p id="image-caption" class="image-caption"></p><p class="muted">可使用键盘 ← / → 切换，Esc 关闭。</p></dialog>
+</body>
+</html>
