@@ -80,7 +80,7 @@ rosrun nav_demo cruise_waypoints.py --route left --dry-run
 rosrun nav_demo cruise_waypoints.py --route left --dwell 3
 ```
 
-- 路线顺序：`src/nav_demo/config/inspection_routes.yaml`（left / straight）
+- 路线顺序：`src/nav_demo/config/inspection_routes.yaml`（left / straight / left_noopt / straight_noopt）
 - 点位与识别朝向：`src/nav_demo/waypoints/inspection_waypoints.yaml`
 - 平移相关参数：`--strafe-ids 14,15,16,17,18`、`--strafe-speed 0.06`、`--no-strafe`
 - 退出（Ctrl-C）会取消 move_base 目标，避免脚本停了车还在跑

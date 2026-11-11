@@ -216,17 +216,18 @@ class CruiseWorker(threading.Thread):
                  log_fn, on_status, pose_get=None, base_frame='base_footprint',
                  run_timer=None, drive_long=DRIVE_SPEED_LONG,
                  drive_mid=DRIVE_SPEED_MID, drive_short=DRIVE_SPEED_SHORT,
-                 rot_speed=1.00, reverse_speed=0.30):
+                 rot_speed=1.00, reverse_speed=0.30, strafe_opt=True):
         super(CruiseWorker, self).__init__(daemon=True)
         self.plan = plan
         self.dwell = dwell
         self.strafe_ids = strafe_ids
-        self.strafe_speed = max(0.02, min(0.15, float(strafe_speed)))
+        self.strafe_speed = max(0.02, min(0.30, float(strafe_speed)))
         self.drive_long = max(0.10, min(0.60, float(drive_long)))
         self.drive_mid = max(0.10, min(0.60, float(drive_mid)))
         self.drive_short = max(0.10, min(0.60, float(drive_short)))
         self.rot_speed = max(0.20, min(1.00, float(rot_speed)))
         self.reverse_speed = max(0.05, min(0.30, float(reverse_speed)))
+        self.strafe_opt = bool(strafe_opt)
         self.map_frame = map_frame
         self.base_frame = base_frame
         self.log_fn = log_fn
@@ -699,16 +700,35 @@ class CruiseWorker(threading.Thread):
                     dist_to_goal = (math.hypot(step['x'] - pose[0], step['y'] - pose[1])
                                     if pose is not None else None)
                     close = dist_to_goal is not None and dist_to_goal < 0.25
-                    goal_yaw = step['yaw'] if close else bearing
+                    if not self.strafe_opt:
+                        target_yaw = step['yaw']
+                    elif step['tasks']:
+                        target_yaw = step['tasks'][0][1]
+                    elif idx + 1 < len(self.plan):
+                        nxt = self.plan[idx + 1]
+                        target_yaw = math.atan2(nxt['y'] - step['y'],
+                                                nxt['x'] - step['x'])
+                    else:
+                        target_yaw = step['yaw']
+                    goal_yaw = target_yaw if close else bearing
+                    heading_matched = (self.strafe_opt and pose is not None and not close
+                                       and abs(self._norm_angle(target_yaw - pose[2])) < 0.20
+                                       and abs(self._norm_angle(bearing - pose[2])) > 0.35)
                     if close:
                         self.log('  距点位 %.2f m，跳过预转向，按记录朝向过去' % dist_to_goal)
+                    elif heading_matched:
+                        goal_yaw = target_yaw
+                        self.log('  车头已对 %.0f°，保持车头平移，跳过转向'
+                                 % math.degrees(target_yaw))
                     else:
                         self.log('  预转向到方位 %.0f°' % math.degrees(bearing))
                         self._rotate_to(bearing, '对准 %s' % step['id'])
                         if self._stop_evt.is_set():
                             break
                     travel_dist = dist_to_goal if dist_to_goal is not None else 1.0
-                    if travel_dist > 2.0:
+                    if heading_matched:
+                        travel_speed = self.strafe_speed
+                    elif travel_dist > 2.0:
                         travel_speed = self.drive_long
                     elif travel_dist > 1.0:
                         travel_speed = self.drive_mid
@@ -944,7 +964,7 @@ class App(object):
         ttk.Spinbox(plan_card, from_=0.5, to=10.0, increment=0.5, width=6,
                     textvariable=self.dwell_var).grid(row=2, column=2, padx=(0, 12))
         self.speed_var = tk.StringVar(value=str(self.args.strafe_speed))
-        ttk.Spinbox(plan_card, from_=0.02, to=0.15, increment=0.01, width=6,
+        ttk.Spinbox(plan_card, from_=0.02, to=0.30, increment=0.01, width=6,
                     textvariable=self.speed_var).grid(row=2, column=3, padx=(0, 12))
         self.skip0_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(plan_card, text='跳过 0 号点', variable=self.skip0_var,
@@ -1349,7 +1369,7 @@ class App(object):
         self._teleop_zero()
         self._teleop_active = False
         dwell = float(self.dwell_var.get())
-        speed = max(0.02, min(0.15, float(self.speed_var.get())))
+        speed = max(0.02, min(0.30, float(self.speed_var.get())))
         self.speed_var.set('%.2f' % speed)
         long_speed = max(0.10, min(0.60, float(self.long_speed_var.get())))
         mid_speed = max(0.10, min(0.60, float(self.mid_speed_var.get())))
@@ -1360,6 +1380,7 @@ class App(object):
                          (self.short_speed_var, short_speed), (self.rot_speed_var, rot_speed),
                          (self.reverse_speed_var, reverse_speed)):
             var.set('%.2f' % val)
+        strafe_opt = not self.route_var.get().endswith('_noopt')
         self.run_timer = CruiseTimer()
         self.log_file.write('\n===== 开始巡航 %s =====\n'
                             % datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -1370,14 +1391,14 @@ class App(object):
                                    run_timer=self.run_timer,
                                    drive_long=long_speed, drive_mid=mid_speed,
                                    drive_short=short_speed, rot_speed=rot_speed,
-                                   reverse_speed=reverse_speed)
+                                   reverse_speed=reverse_speed, strafe_opt=strafe_opt)
         self.worker.start()
         self.start_btn.configure(state='disabled')
         self.pause_btn.configure(state='normal')
         self.stop_btn.configure(state='normal')
         self.resume_btn.configure(state='disabled')
-        self._log('开始巡航：%d 个点，%.1fs 停留，%.2f m/s 平移'
-                  % (len(self.plan), dwell, speed))
+        self._log('开始巡航：%d 个点，%.1fs 停留，%.2f m/s 平移，平移优化=%s'
+                  % (len(self.plan), dwell, speed, '开' if strafe_opt else '关'))
 
     def pause(self):
         if self.worker is not None:
@@ -1611,7 +1632,7 @@ def main():
     ap.add_argument('--route', default=None)
     ap.add_argument('--dwell', type=float, default=1.0)
     ap.add_argument('--strafe-ids', default=DEFAULT_STRAFE_IDS)
-    ap.add_argument('--strafe-speed', type=float, default=0.15)
+    ap.add_argument('--strafe-speed', type=float, default=0.30)
     ap.add_argument('--no-strafe', action='store_true')
     ap.add_argument('--map', default=DEFAULT_MAP)
     ap.add_argument('--map-frame', default='map')

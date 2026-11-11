@@ -112,7 +112,7 @@ docs/                                设计记录
 | 预设点位 | `src/nav_demo/config/inspection_points.yaml` |
 | 路线顺序 | `src/nav_demo/config/inspection_routes.yaml` |
 
-现成路线：`left`（左转，原 fast）、`straight`（直行），以及调试用的 `test_789`、`test_strafe`、`test_15`。
+现成路线：`left`（左转，原 fast）、`straight`（直行）、`left_noopt` / `straight_noopt`（不平移优化对照），以及调试用的 `test_789`、`test_strafe`、`test_15`。
 
 **换地图后点位要重记**，旧坐标对新图不成立。
 
