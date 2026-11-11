@@ -13,6 +13,9 @@
   <arg name="capture_file" default="" />
   <arg name="loop" default="false" />
   <arg name="replay_rate" default="2" />
+  <arg name="floor_map" default="" />
+  <arg name="hotspot_delta" default="2.0" />
+  <arg name="roi" default="" />
 
   <group ns="mlx90640">
     <node pkg="mlx90640_ros" type="mlx90640_node.py" name="mlx90640_node" output="screen">
@@ -29,6 +32,9 @@
       <param name="capture_file" value="$(arg capture_file)" type="str" />
       <param name="loop" value="$(arg loop)" type="bool" />
       <param name="replay_rate" value="$(arg replay_rate)" type="double" />
+      <param name="floor_map" value="$(arg floor_map)" type="str" />
+      <param name="hotspot_delta" value="$(arg hotspot_delta)" type="double" />
+      <param name="roi" value="$(arg roi)" type="str" />
     </node>
   </group>
 </launch>

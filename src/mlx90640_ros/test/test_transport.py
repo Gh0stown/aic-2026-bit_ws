@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline adapter regression tests: never import pyserial or open hardware."""
+import json
 from pathlib import Path
 import struct
 import sys
@@ -274,7 +275,9 @@ class MessageTests(unittest.TestCase):
 
     def test_node_rejects_invalid_parameters_before_loading_library(self):
         modules = {"sensor_msgs": SimpleNamespace(),
-                   "sensor_msgs.msg": SimpleNamespace(Image=Message, Temperature=Message)}
+                   "sensor_msgs.msg": SimpleNamespace(Image=Message, Temperature=Message),
+                   "std_msgs": SimpleNamespace(),
+                   "std_msgs.msg": SimpleNamespace(String=Message)}
         invalid = [
             {}, {"~capture_file": "offline", "~port": "/FAKE"},
             {"~capture_file": "offline", "~baud": 0},
@@ -328,17 +331,24 @@ class MessageTests(unittest.TestCase):
                                 loginfo=lambda message: None, on_shutdown=lambda fn: None,
                                 Publisher=Publisher, Time=SimpleNamespace(now=now))
         modules = {"sensor_msgs": SimpleNamespace(),
-                   "sensor_msgs.msg": SimpleNamespace(Image=Message, Temperature=Message)}
+                   "sensor_msgs.msg": SimpleNamespace(Image=Message, Temperature=Message),
+                   "std_msgs": SimpleNamespace(),
+                   "std_msgs.msg": SimpleNamespace(String=Message)}
         with patch.dict(sys.modules, modules), patch.object(core, "Decoder"), \
                 patch.object(core, "render_image", return_value=self.color), \
                 patch("mlx90640_ros.node.ReplayTransport", Replay):
             self.assertEqual(run_node(rospy), 0)
         self.assertEqual([p.name for p in publishers],
-                         ["temperature_image", "thermal_image", "ambient_temperature"])
+                         ["temperature_image", "thermal_image", "ambient_temperature",
+                          "hotspot"])
         self.assertTrue(all(p.options == {"queue_size": 1, "latch": False} for p in publishers))
         self.assertEqual(waits, [0.5])
         self.assertEqual(len(stamps), 1)
-        self.assertTrue(all(p.messages[0].header.stamp is stamps[0] for p in publishers))
+        self.assertTrue(all(p.messages[0].header.stamp is stamps[0] for p in publishers[:3]))
+        payload = json.loads(publishers[3].messages[0].data)
+        self.assertEqual(payload["floor"], "")
+        self.assertEqual(payload["row_index"], 23)
+        self.assertEqual(payload["col_index"], 31)
 
 
 class ViewerTests(unittest.TestCase):

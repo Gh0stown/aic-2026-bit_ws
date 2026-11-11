@@ -78,6 +78,9 @@ sudo usermod -aG dialout "$USER"
 | `capture_file` | 空 | 非空则回放，不打开串口 |
 | `replay_rate` | 2.0 | 回放子页/秒，不是完整图/秒 |
 | `loop` | false | 回放是否循环 |
+| `floor_map` | 空 | 行号→楼层标定表，如 `1F:16-23,2F:8-15,3F:0-7`（行含端点、不可重叠） |
+| `hotspot_delta` | 2.0 | 比峰值低不超过该 ℃ 的连通像素算同一热点 |
+| `roi` | 空 | 只在 `r0,c0,r1,c1`（半开）内找热点，用于排除背景 |
 
 ## 4. ROS 数据接口
 
@@ -86,12 +89,27 @@ sudo usermod -aG dialout "$USER"
 | 相对话题 | 类型 | 含义 |
 |---|---|---|
 | `temperature_image` | `sensor_msgs/Image` | width=32，height=24，encoding=`32FC1`，step=128；float32 摄氏度，行优先 |
-| `thermal_image` | `sensor_msgs/Image` | `bgr8` 伪彩及热点标记，32×scale 列、24×scale+42 行（底部文字区） |
+| `thermal_image` | `sensor_msgs/Image` | `bgr8` 伪彩、热点十字与绿色热点框，32×scale 列、24×scale+42 行（底部文字区） |
 | `ambient_temperature` | `sensor_msgs/Temperature` | 传感器内部环境温度，非目标/中心/最高温；variance=0 表示未知 |
+| `hotspot` | `std_msgs/String` | JSON：峰值温度、亚像素行列、整像素峰值、像素框、面积、平均温度、楼层 |
 
 同批消息使用相同 ROS 主机接收时间与 frame_id，不把板端毫秒数冒充 ROS 时间。温度图单位特意为摄氏度（不是 K）；伪彩图只供观察，算法应读取 `temperature_image`。
 
 图像坐标 row=0..23、col=0..31，保持传感器原始方向，不自动旋转/镜像；安装方向、视场和楼层映射需现场标定。未标定安装位姿，因此不发布 `base_link → mlx90640_link`，也不提供虚假的 CameraInfo。
+
+### 4.1 热点与楼层（`hotspot`）
+
+`hotspot` 每帧随温度图一起发布，示例：
+
+```json
+{"peak_c": 33.046, "row": 16.0, "col": 16.0, "row_index": 16, "col_index": 16,
+ "box": [16, 14, 19, 17], "area": 9, "mean_c": 31.4, "floor": "2F"}
+```
+
+- `peak_c` 是峰值整像素的真实温度；`row`/`col` 是 3×3 二次曲面拟合的亚像素中心（边界或非极大时退回整像素）。
+- `box` 是含端点的像素框 `[r0, c0, r1, c1]`，只圈比峰值低 `hotspot_delta` 以内的 8 连通区域，伪彩图上以绿框画出。
+- `floor` 由 `floor_map` 按 **亚像素行号** 查表；落在表外时取最近楼层，因此标定偏差不会让答案变空。不配 `floor_map` 时为空字符串。
+- 32×24 没有深度，`hotspot` 只回答“热像里的哪个像素最热”，**不是**世界坐标。要落到实物/`map` 坐标，需另做相机外参、距离（雷达或已知平面）或热像↔可见光单应标定。
 
 固件约每秒发 2 个棋盘子页，每个只更新一半像素。本包收齐两个不同的新子页才发布完整图（约 1Hz）；重复子页、启动首个半图不会发布。每次输出是独立副本，不复用上一张图未更新的一半。
 
@@ -109,6 +127,14 @@ rosrun mlx90640_ros mlx90640_viewer.py --capture "$(rospack find mlx90640_ros)/t
 ```
 
 按 `q` 退出、`s` 保存、`r` 重新请求 EEPROM。默认输出目录 `~/Pictures/mlx90640/`；可用 `--save-dir` 覆盖。更多参数见 `--help`。保存失败会报告错误，不假报成功。
+
+### 5.1 给采集 GUI 的会话接口
+
+`mlx90640_ros.thermal_session.ThermalSession` 在后台线程读串口或回放，向界面暴露
+`latest()`（已画框的 BGR 图 + 热点 + 楼层）、`record_floor()`（现场标定）和
+`save_snapshot()`（PNG + JSON），不依赖 tkinter、PIL 或 ROS。接入位置和验收清单见
+[采集 GUI 接入说明](<../../../docs/thermal_gui_integration.md>)。
+一个进程只能有一个 `ThermalSession`，也不要和 `roslaunch mlx90640_ros` 抢同一串口。
 
 ## 6. 协议、恢复与限制
 

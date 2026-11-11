@@ -11,6 +11,9 @@
   <arg name="frame_id" default="mlx90640_link" />
   <arg name="loop" default="false" />
   <arg name="replay_rate" default="2" />
+  <arg name="floor_map" default="" />
+  <arg name="hotspot_delta" default="2.0" />
+  <arg name="roi" default="" />
 
   <include file="$(find mlx90640_ros)/launch/mlx90640.launch">
     <arg name="port" value="" />
@@ -25,5 +28,8 @@
     <arg name="frame_id" value="$(arg frame_id)" />
     <arg name="loop" value="$(arg loop)" />
     <arg name="replay_rate" value="$(arg replay_rate)" />
+    <arg name="floor_map" value="$(arg floor_map)" />
+    <arg name="hotspot_delta" value="$(arg hotspot_delta)" />
+    <arg name="roi" value="$(arg roi)" />
   </include>
 </launch>

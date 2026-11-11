@@ -5,6 +5,7 @@ source devel/setup.bash
 MLX90640_ROS_INTEGRATION=1 python3 -m unittest discover \
     -s src/mlx90640_ros/test -p test_ros_replay.py -v
 """
+import json
 import os
 from pathlib import Path
 import signal
@@ -59,9 +60,10 @@ class RosReplayTest(unittest.TestCase):
                         self.fail('isolated ROS master did not become ready')
                     import rospy
                     from sensor_msgs.msg import Image, Temperature
+                    from std_msgs.msg import String
                     rospy.init_node('mlx_replay_test', anonymous=True, disable_signals=True)
                     received = {'temperature_image': [], 'thermal_image': [],
-                                'ambient_temperature': []}
+                                'ambient_temperature': [], 'hotspot': []}
                     lock = threading.Lock()
                     done = threading.Event()
 
@@ -73,7 +75,8 @@ class RosReplayTest(unittest.TestCase):
 
                     for topic, message_type in [('temperature_image', Image),
                                                 ('thermal_image', Image),
-                                                ('ambient_temperature', Temperature)]:
+                                                ('ambient_temperature', Temperature),
+                                                ('hotspot', String)]:
                         subscribers.append(rospy.Subscriber('/mlx90640/' + topic, message_type,
                                                             callback, callback_args=topic))
                     process = subprocess.Popen(['roslaunch', 'mlx90640_ros', 'replay.launch',
@@ -81,11 +84,13 @@ class RosReplayTest(unittest.TestCase):
                                                stdout=logfile, stderr=subprocess.STDOUT,
                                                start_new_session=True)
                     processes.append(process)
-                    self.assertTrue(done.wait(12), 'did not receive two batches of all three topics')
+                    self.assertTrue(done.wait(12), 'did not receive two batches of all four topics')
                     with lock:
                         messages = {topic: list(values) for topic, values in received.items()}
                     by_stamp = [{message.header.stamp.to_nsec(): message for message in values}
-                                for values in messages.values()]
+                                for values in (messages['temperature_image'],
+                                               messages['thermal_image'],
+                                               messages['ambient_temperature'])]
                     shared = set(by_stamp[0]).intersection(by_stamp[1], by_stamp[2])
                     self.assertGreaterEqual(len(shared), 2)
                     for image in messages['temperature_image'][:2]:
@@ -107,6 +112,13 @@ class RosReplayTest(unittest.TestCase):
                     for message in messages['ambient_temperature'][:2]:
                         self.assertAlmostEqual(message.temperature, 29.56, delta=.2)
                         self.assertEqual(message.variance, 0)
+                    for message in messages['hotspot'][:2]:
+                        payload = json.loads(message.data)
+                        r0, c0, r1, c1 = payload['box']
+                        self.assertTrue(0 <= r0 <= r1 <= 23)
+                        self.assertTrue(0 <= c0 <= c1 <= 31)
+                        self.assertGreaterEqual(payload['peak_c'], payload['mean_c'])
+                        self.assertEqual(payload['floor'], '')
                     published = dict(rospy.get_published_topics())
                     self.assertNotIn('/cmd_vel', published)
                 finally:

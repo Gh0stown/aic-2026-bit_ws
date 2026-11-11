@@ -6,6 +6,7 @@ import sys
 import time
 
 from . import core
+from .hotspot import find_hotspot
 from .transport import ReplayTransport, SerialTransport, positive_rate
 
 
@@ -113,7 +114,8 @@ def run(args):
             if stop():
                 break
             latest = core.render_image(sample, scale=args.scale,
-                                       tmin=args.tmin, tmax=args.tmax)
+                                       tmin=args.tmin, tmax=args.tmax,
+                                       hotspot=find_hotspot(sample.temps))
             count += 1
             if cv2 is not None:
                 cv2.imshow("MLX90640 (q quit, s save, r EEPROM)", latest)

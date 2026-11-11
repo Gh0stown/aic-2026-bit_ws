@@ -192,11 +192,13 @@ def iter_capture_payloads(frames, interval_ms=500):
         yield capture_payload(words, index, interval_ms)
 
 
-def render_image(sample, scale=12, tmin=None, tmax=None):
+def render_image(sample, scale=12, tmin=None, tmax=None, hotspot=None, floor=""):
     """Return an annotated BGR uint8 image, without modifying temperatures.
 
     cv2 is imported only here; decoding/replay requires no GUI dependencies.
     Display limits affect colors only, never the raw temperature Sample.
+    ``hotspot`` is any object with a ``box`` of inclusive (r0, c0, r1, c1)
+    pixel bounds; it is drawn as a green rectangle and never changes data.
     """
     import cv2
 
@@ -216,6 +218,19 @@ def render_image(sample, scale=12, tmin=None, tmax=None):
     center = (int(col * scale + scale // 2), int(row * scale + scale // 2))
     cv2.drawMarker(image, center, (255, 255, 255), cv2.MARKER_CROSS,
                    max(5, scale), 1)
+    if hotspot is not None:
+        r0, c0, r1, c1 = hotspot.box
+        left, top = int(c0 * scale), int(r0 * scale)
+        right, bottom = int((c1 + 1) * scale) - 1, int((r1 + 1) * scale) - 1
+        cv2.rectangle(image, (left, top), (right, bottom), (0, 255, 0), 2)
+        if floor:
+            # Keep the label clear of the hottest pixels: above a box with
+            # room, otherwise just below it inside the image. A dark outline
+            # keeps green text readable over hot red pixels.
+            label_y = top - 5 if top >= 18 else min(bottom + 14, 24 * scale - 4)
+            for color, thickness in (((0, 0, 0), 3), ((0, 255, 0), 1)):
+                cv2.putText(image, str(floor), (left, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, .50, color, thickness, cv2.LINE_AA)
     # Separate caption avoids covering the actual hotspot/data area.
     image = cv2.copyMakeBorder(image, 0, 42, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
     caption = "Max {:.2f}  Min {:.2f} C".format(float(temps.max()), float(temps.min()))
