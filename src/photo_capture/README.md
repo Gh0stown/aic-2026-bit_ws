@@ -1,6 +1,6 @@
-# photo_capture —— 拍照 / YOLO 检测 / 区域扫描 / 仪表识别
+# photo_capture —— 拍照 / YOLO 检测 / 区域扫描 / 仪表识别 / 红外热像
 
-调用本机摄像头的四个模式：
+调用本机摄像头的五个模式：
 
 - **拍照模式**：按类型采集照片（默认 1280×720），照片存到 `输出目录/类型/`；
   可设连拍张数，运行中换类型。
@@ -10,6 +10,8 @@
   也可不用底盘、手动遥控平移，脚本只负责抽帧和拼接。拼接后可用 YOLO 分块检测全景。
 - **仪表识别模式**：加载 Pose.pt，识别温度/湿度表的旋转轴、指针尖端、最小/最大刻度，
   按量程换算读数，保存截图和 JSONL 记录。
+- **红外热像模式**：通过 `mlx90640_ros.thermal_session` 显示 MLX90640 热图，
+  支持 `capture.bin` 回放、串口实机、楼层标定和 PNG+JSON 快照。
 
 > 区域扫描目前只做**平移**场景，不做旋转全景。
 
@@ -30,6 +32,8 @@ python3 -c "import ultralytics, torch; print(ultralytics.__version__, torch.__ve
 640 尺寸大约 2–6 FPS，`--imgsz 416` 会快一些。
 
 区域扫描的自动平移需要 ROS（`rospy`、`geometry_msgs`、`nav_msgs`、`sensor_msgs`）和底盘驱动。
+红外热像需要先 `source devel/setup.bash` 并确认 `mlx90640_ros` 已 `catkin_make`；
+它走串口，不占用白光摄像头。
 
 > OpenCV 编译时没有 GUI 后端（`GUI: NONE`），预览用 tkinter，不用 `cv2.imshow`。
 
@@ -44,8 +48,8 @@ python3 src/photo_capture/scripts/capture_photos.py
 ```
 
 启动后先弹「选择启动模式」：点按钮或按 `1`（拍照）/ `2`（模型测试）/ `3`（区域扫描）/
-`4`（仪表识别）。想跳过询问可以用 `--mode photo` / `--mode detect` / `--mode scan` /
-`--mode gauge`。
+`4`（仪表识别）/ `5`（红外热像）。想跳过询问可以用 `--mode photo` / `--mode detect` /
+`--mode scan` / `--mode gauge` / `--mode thermal`。
 
 ## 拍照模式
 
@@ -346,11 +350,90 @@ rosrun photo_capture capture_photos.py --no-gui --mode gauge \
 > 模型必须是 pose 任务；选错普通检测模型会提示“所选模型不是 pose 模型”。
 > 关键点置信度低于 `--gauge-kpt-conf`、或关键点挤成一团时不会算读数，界面/终端会显示原因。
 
+## 红外热像模式（MLX90640）
+
+热像只回答“画面里哪个像素最热、对应哪一层”，不提供世界坐标；它走 ESP32-S3 串口，
+和白光摄像头互不影响。**一个进程只能有一个 `ThermalSession`**，也不要同时开
+`roslaunch mlx90640_ros` 抢同一个串口。
+
+### 无硬件回放
+
+```bash
+rosrun photo_capture capture_photos.py --mode thermal \
+  --capture src/mlx90640_ros/test/data/capture.bin
+```
+
+`--capture` 是回放抓包，`loop=True` 会循环；适合先调界面和验证出图，不需要接热像硬件。
+
+### 实机串口
+
+先确认设备身份：
+
+```bash
+ls -l /dev/serial/by-id/
+rosrun photo_capture capture_photos.py --mode thermal \
+  --thermal-port /dev/thermal
+```
+
+也可以用界面里的「回放抓包…」和「连接串口」按钮切换数据源。
+
+### 楼层标定：每层记录 2~3 次取中位数
+
+热像没有世界坐标，只有 24×32 温度矩阵的**图像行号**（row 0 是图像顶部）。
+标定流程：
+
+1. 车停 12 号点，暖宝宝一次只贴一层；
+2. 等 1~2 秒，看着热像峰值落在目标层；
+3. 点「记录 1F / 2F / 3F」；同一层可以换几个停车位置**重复记录 2~3 次**；
+4. 界面会对同一层的记录取 **row 中位数**，再自动按相邻楼层中心的中点划分区间；
+5. 最后看楼层表，例如四层 `4F:0-5,3F:6-11,2F:12-17,1F:18-23`，点「应用楼层表」也可以手动改。
+   默认表只是四层等分占位，**未到 12 号点标定前不要把它当准确楼层**。
+
+运行时的判层用**峰值行**（`frame.hotspot.row`），不是热点框中心，也不是世界坐标。
+所以“多拍几张”是为了对同一层多取几个停车样本，不是把多张图相加。
+
+### 界面操作
+
+| 操作 | 说明 |
+| --- | --- |
+| 点「保存快照」 / `S` | 保存热像 PNG + 同名 JSON |
+| 「连接串口」 | 用输入框里的 `/dev/serial/by-id/...` 重建 session |
+| 「回放抓包…」 | 选择 `capture.bin` 做无硬件回放 |
+| 「应用楼层表」 | 写入 `4F:0-5,3F:6-11,2F:12-17,1F:18-23` 这类映射 |
+| 「记录 1F/2F/3F/4F」 | 用当前帧峰值行记录楼层中心；同一层可多次记录取中位数 |
+| 热点框 Δ℃ + 应用 | 调整热点区域阈值，默认 2.0℃ |
+| `Esc` / 关窗口 | `session.stop()` 并退出 |
+
+当前读数会显示峰值温度、峰值行列、楼层和环境温度。保存位置：
+
+```
+~/Pictures/photo_capture/红外热像/thermal_YYYYmmdd_HHMMSS_mmm.png
+~/Pictures/photo_capture/红外热像/thermal_YYYYmmdd_HHMMSS_mmm.json
+```
+
+热像装反时楼层表要整体倒过来：`row=0` 是图像顶部。判层用峰值行，不要用热点框中心。
+`stop()` 后不要复用同一个 `ThermalSession` 对象；界面切换数据源时会先 stop 再新建。
+
+### 命令行回放
+
+```bash
+rosrun photo_capture capture_photos.py --no-gui --mode thermal \
+  --capture src/mlx90640_ros/test/data/capture.bin
+```
+
+终端按 1 Hz 左右打印峰值、行列、楼层和环境温度，`Ctrl+C` 退出。
+
+### 注意
+
+- 不要修改 `mlx90640_ros` 内部；GUI 只调用 `ThermalSession` / `FloorTable` 公开接口；
+- 热像和 `roslaunch mlx90640_ros` 二选一；
+- 串口不能用 `/dev/ttyUSB0` 猜，先看 `/dev/serial/by-id/`。
+
 ## 常用参数
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--mode` | `ask` | `ask` 每次询问 / `photo` / `detect` / `scan` / `gauge` |
+| `--mode` | `ask` | `ask` 每次询问 / `photo` / `detect` / `scan` / `gauge` / `thermal` |
 | `-d, --output-dir` | `~/Pictures/photo_capture` | 照片、模型截图、区域扫描、仪表记录的根目录 |
 | `-t, --type` | 无（启动时询问） | 预填照片类型 |
 | `-c, --count` | `1` | 一次连拍张数（1-99） |
@@ -358,6 +441,12 @@ rosrun photo_capture capture_photos.py --no-gui --mode gauge \
 | `--model` | 无 | YOLO 权重路径或文件名 |
 | `--model-dir` | `~/AI视觉` | 模型目录 |
 | `--conf` | `0.25` | 检测置信度阈值 0.01–0.99 |
+| `--thermal-capture` / `--capture` | 无 | MLX90640 `capture.bin` 回放 |
+| `--thermal-port` | `/dev/thermal` | MLX90640 专属串口；默认 `/dev/thermal` |
+| `--thermal-scale` | `12` | 热像伪彩放大倍数 |
+| `--thermal-delta` | `2.0` | 热点框温度差 ℃ |
+| `--thermal-floor-table` | `4F:0-5,3F:6-11,2F:12-17,1F:18-23` | 初始四层等分表（占位，现场必须重录） |
+| `--thermal-replay-rate` | `2.0` | 回放帧率 Hz |
 | `--imgsz` | `640` | 推理输入尺寸，CPU 慢可用 `416` |
 | `--infer-device` | `auto` | `auto` / `cpu` / `cuda` |
 | `--width / --height` | `1280 / 720` | 采集分辨率；0 表示用摄像头默认值；≥1280 时自动用 MJPG |
@@ -451,6 +540,13 @@ YOLO 裁剪图（按模型 / 类别）：
 <输出目录>/仪表识别/<模型名>/snapshots/*.jpg
 <输出目录>/仪表识别/<模型名>/templates/<类别>.json
 <输出目录>/仪表识别/<模型名>/readings.jsonl
+```
+
+红外热像：
+
+```
+<输出目录>/红外热像/thermal_YYYYmmdd_HHMMSS_mmm.png
+<输出目录>/红外热像/thermal_YYYYmmdd_HHMMSS_mmm.json
 ```
 
 名字里的 `/ \ : * ? " < > |` 会换成 `_`；文件名带毫秒时间戳，不覆盖旧图。

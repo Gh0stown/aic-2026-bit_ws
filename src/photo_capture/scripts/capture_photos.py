@@ -6,10 +6,13 @@
   * 启动时询问本次要拍的照片类型，照片保存到 <输出目录>/<类型>/ 下；
   * 一次拍照可以连拍 N 张（N 随时可改），也可以单张拍；
   * 运行中随时可以切换类型，换类型后自动建对应的文件夹；
-  * 启动时可以选择「拍照模式」「模型测试模式」「区域扫描模式」或「仪表识别模式」；
+  * 启动时可以选择「拍照模式」「模型测试模式」「区域扫描模式」「仪表识别模式」
+    或「红外热像模式」；
     模型测试模式会加载 ~/AI视觉 下的 .pt 权重，实时画框显示识别结果；
     区域扫描模式控制麦轮底盘横向平移，逐帧拍摄并拼成横向大图；
     仪表识别模式加载 Pose.pt，识别温度/湿度表并计算指针读数；
+    红外热像模式通过 mlx90640_ros.thermal_session 显示 MLX90640 热图，支持
+    capture.bin 回放、串口连接、楼层标定和快照；
   * 有桌面环境时用 tkinter 做预览窗口（OpenCV 只负责读摄像头和写图片），
     没有图形界面时自动退化为命令行交互模式。
 
@@ -88,6 +91,15 @@ except Exception:  # pragma: no cover - 取决于运行环境
     gauge_module = None
     GAUGE_MODULE_AVAILABLE = False
 
+try:  # 红外热像；缺失时只影响红外热像模式
+    from mlx90640_ros.thermal_session import ThermalSession, FloorTable
+
+    THERMAL_AVAILABLE = True
+except Exception:  # pragma: no cover - 取决于运行环境
+    ThermalSession = None
+    FloorTable = None
+    THERMAL_AVAILABLE = False
+
 # find_spec 只查包在不在，不真正 import，启动不会被拖慢
 YOLO_RUNTIME_AVAILABLE = bool(
     YOLO_MODULE_AVAILABLE and yolo_detect.ultralytics_available())
@@ -127,6 +139,7 @@ MODE_PHOTO = "photo"
 MODE_DETECT = "detect"
 MODE_SCAN = "scan"
 MODE_GAUGE = "gauge"
+MODE_THERMAL = "thermal"
 
 CJK_FONT_CANDIDATES = (
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -894,7 +907,7 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         ttk.Label(body, text="请选择启动模式", font=self._title_font).pack(anchor="w")
         ttk.Label(
             body,
-            text="拍照采集训练照片；模型测试做实时 YOLO 检测；区域扫描用平移拼图；仪表识别读温度/湿度表。",
+            text="拍照采集训练照片；模型测试做实时 YOLO 检测；区域扫描用平移拼图；仪表识别读温度/湿度表；红外热像看 MLX90640 热图。",
             wraplength=560, justify="left", foreground="#687b8e",
             font=self._sub_font,
         ).pack(anchor="w", pady=(2, 18))
@@ -955,9 +968,24 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
                 justify="center", foreground="#b00020", width=16,
             ).grid(row=1, column=1, sticky="nsew")
 
+        if THERMAL_AVAILABLE:
+            self.thermal_button = tk.Button(
+                buttons, text="红外热像\n\nMLX90640 热图",
+                width=14, height=4, justify="center", font=self._button_font,
+                relief="flat", bd=0, cursor="hand2", background="#087f8c",
+                foreground="white", activebackground="#066b77", activeforeground="white",
+                command=lambda: self._choose(MODE_THERMAL),
+            )
+            self.thermal_button.grid(row=2, column=0, sticky="nsew", padx=(0, 10))
+        else:
+            ttk.Label(
+                buttons, text="红外热像不可用\n（缺少 mlx90640_ros）",
+                justify="center", foreground="#b00020", width=16,
+            ).grid(row=2, column=0, sticky="nsew", padx=(0, 10))
+
         ttk.Label(
             body,
-            text="提示：按数字键 1 / 2 / 3 / 4 也可以选择，Esc 取消。",
+            text="提示：按数字键 1 / 2 / 3 / 4 / 5 也可以选择，Esc 取消。",
             foreground="#888888",
             font=self._sub_font,
         ).pack(pady=(16, 0))
@@ -966,6 +994,7 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         self.bind("<KeyPress-2>", lambda event: self._choose(MODE_DETECT))
         self.bind("<KeyPress-3>", lambda event: self._choose(MODE_SCAN))
         self.bind("<KeyPress-4>", lambda event: self._choose(MODE_GAUGE))
+        self.bind("<KeyPress-5>", lambda event: self._choose(MODE_THERMAL))
         self.bind("<Escape>", lambda event: self._cancel())
         self.protocol("WM_DELETE_WINDOW", self._cancel)
 
@@ -987,6 +1016,8 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         if mode == MODE_SCAN and not SCAN_MODULE_AVAILABLE:
             return
         if mode == MODE_GAUGE and not (GAUGE_MODULE_AVAILABLE and YOLO_RUNTIME_AVAILABLE):
+            return
+        if mode == MODE_THERMAL and not THERMAL_AVAILABLE:
             return
         self.result = mode
         self.destroy()
@@ -3282,6 +3313,332 @@ class GaugeApp(object):
         self.root.destroy()
 
 
+class ThermalApp(object):
+    """红外热像窗口：MLX90640 热图、楼层标定、热点读数和快照。"""
+
+    def __init__(self, root, session, output_root, source_label="",
+                 port="/dev/thermal", capture="", scale=12, delta=2.0,
+                 replay_rate=2.0, floor_table_text=""):
+        self.root = root
+        self.session = session
+        self.output_root = Path(output_root)
+        self.thermal_dir = self.output_root / "红外热像"
+        self._scale = int(scale)
+        self._delta = float(delta)
+        self._replay_rate = float(replay_rate)
+        self._capture = str(capture or "")
+        self._source_label = source_label or "未连接"
+        self._closed = False
+        self._after_id = None
+        self._shown = None
+        self._last_error = None
+        self._floor_samples = {}
+        self._bold_font = tkfont.Font(root=root, size=12, weight="bold")
+
+        table_text = floor_table_text or "4F:0-5,3F:6-11,2F:12-17,1F:18-23"
+        if session is not None:
+            try:
+                current = session.floor_table.to_text()
+                if current:
+                    table_text = current
+            except Exception:
+                pass
+        self.peak_var = tk.StringVar(value="--")
+        self.row_var = tk.StringVar(value="--")
+        self.floor_now_var = tk.StringVar(value="—")
+        self.ambient_var = tk.StringVar(value="--")
+        self.source_var = tk.StringVar(value=self._source_label)
+        self.capture_var = tk.StringVar(value=self._capture or "未选择回放文件")
+        self.port_var = tk.StringVar(value=port or "")
+        self.floor_table_var = tk.StringVar(value=table_text)
+        self.delta_var = tk.StringVar(value="{:.1f}".format(self._delta))
+        self.status_var = tk.StringVar(
+            value="等待热像帧…" if session is not None else "未连接")
+
+        self._build_ui()
+        self._bind_keys()
+        self.root.title("红外热像 - MLX90640")
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.minsize(700, 500)
+        self._tick()
+
+    # -- 界面 ---------------------------------------------------------
+    def _build_ui(self) -> None:
+        primary, content = _workspace(
+            self, "红外热像", "MLX90640 THERMAL",
+            "S 保存快照  ·  Esc 退出\n"
+            "热像只给出画面峰值/楼层，不提供世界坐标；回放抓包不需要硬件。")
+        ttk.Label(primary, textvariable=self.source_var, font=self._bold_font,
+                  wraplength=230, justify="left").pack(anchor="w", pady=(0, 8))
+        _action(primary, "保存快照 (S)", self.save_snapshot, primary=True)
+
+        source = _section(content, "数据源")
+        ttk.Label(source, text="串口（/dev/serial/by-id/...）",
+                  style="Capture.Muted.TLabel", wraplength=225).pack(anchor="w")
+        self.port_entry = ttk.Entry(source, textvariable=self.port_var)
+        self.port_entry.pack(fill="x", pady=(2, 5))
+        _action(source, "连接串口", self.connect_serial)
+        _action(source, "回放抓包…", self.choose_capture)
+        ttk.Label(source, textvariable=self.capture_var,
+                  style="Capture.Muted.TLabel", wraplength=225,
+                  justify="left").pack(anchor="w", pady=(4, 0))
+
+        reading = _section(content, "当前读数")
+        for label, var in (("峰值温度", self.peak_var),
+                           ("峰值位置", self.row_var),
+                           ("楼层", self.floor_now_var),
+                           ("环境温度", self.ambient_var)):
+            row = ttk.Frame(reading)
+            row.pack(fill="x", pady=1)
+            ttk.Label(row, text=label, style="Capture.Muted.TLabel").pack(side="left")
+            ttk.Label(row, textvariable=var, font=self._bold_font).pack(side="right")
+
+        calibration = _section(content, "楼层标定")
+        ttk.Label(calibration, text="楼层表（row 0 是图像顶部；默认四层等分，现场必须重录）",
+                  style="Capture.Muted.TLabel", wraplength=225).pack(anchor="w")
+        self.floor_entry = ttk.Entry(calibration, textvariable=self.floor_table_var)
+        self.floor_entry.pack(fill="x", pady=(2, 5))
+        _action(calibration, "应用楼层表", self.apply_floor_table)
+        row = ttk.Frame(calibration)
+        row.pack(fill="x", pady=(2, 0))
+        for name in ("1F", "2F", "3F", "4F"):
+            ttk.Button(row, text="记录 " + name,
+                       command=lambda value=name: self.record_floor(value)
+                       ).pack(side="left", expand=True, fill="x", padx=1)
+
+        params = _section(content, "热点参数")
+        ttk.Label(params, text="热点框温度差 Δ℃",
+                  style="Capture.Muted.TLabel").pack(anchor="w")
+        self.delta_spin = ttk.Spinbox(
+            params, from_=0.1, to=20.0, increment=0.1, width=8,
+            textvariable=self.delta_var)
+        self.delta_spin.pack(anchor="w", pady=(2, 5))
+        _action(params, "应用热点参数", self.apply_delta)
+        ttk.Label(params, text="保存位置", style="Capture.Muted.TLabel").pack(
+            anchor="w", pady=(8, 1))
+        ttk.Label(params, text=display_path(self.thermal_dir),
+                  style="Capture.Muted.TLabel", wraplength=225,
+                  justify="left").pack(anchor="w")
+
+    def _bind_keys(self) -> None:
+        self.root.bind("<KeyPress-s>", self._on_key_s)
+        self.root.bind("<KeyPress-S>", self._on_key_s)
+        self.root.bind("<Escape>", lambda event: self.close())
+
+    def _focus_is_text(self) -> bool:
+        widget = self.root.focus_get()
+        return isinstance(widget, (tk.Entry, tk.Text, tk.Spinbox,
+                                   ttk.Entry, ttk.Spinbox, ttk.Combobox))
+
+    def _on_key_s(self, event=None):
+        if self._focus_is_text():
+            return None
+        self.save_snapshot()
+        return "break"
+
+    def _set_status(self, text, error=False):
+        self.status_var.set(text)
+        try:
+            self.status_label.configure(
+                foreground="#b00020" if error else "#444444")
+        except tk.TclError:
+            pass
+
+    # -- 生命周期 -----------------------------------------------------
+    def _stop_session(self) -> None:
+        session = self.session
+        self.session = None
+        self._shown = None
+        if session is not None:
+            try:
+                session.stop()
+            except Exception:
+                pass
+
+    def _start_session(self, session, source_label, port="", capture=""):
+        self._stop_session()
+        try:
+            session.start()
+        except Exception as error:
+            try:
+                session.stop()
+            except Exception:
+                pass
+            self._set_status("热像启动失败：{}".format(error), error=True)
+            return False
+        self.session = session
+        self._shown = None
+        self._last_error = None
+        self._floor_samples.clear()
+        self._source_label = source_label
+        self.source_var.set(source_label)
+        if port:
+            self.port_var.set(port)
+        if capture:
+            self._capture = capture
+            self.capture_var.set(capture)
+        self._set_status("已连接：{}".format(source_label))
+        return True
+
+    def connect_serial(self) -> None:
+        port = self.port_var.get().strip()
+        if not port:
+            self._set_status("请填写 /dev/serial/by-id/... 串口", error=True)
+            return
+        if not THERMAL_AVAILABLE:
+            self._set_status("缺少 mlx90640_ros", error=True)
+            return
+        # 厂商库在进程内只能有一个 Decoder，先停掉旧 session 再建新的
+        self._stop_session()
+        try:
+            session = ThermalSession(
+                port=port, scale=self._scale, delta_c=self._current_delta(),
+                floor_table=self.floor_table_var.get(),
+                replay_rate=self._replay_rate)
+        except Exception as error:
+            self._set_status("创建热像串口会话失败：{}".format(error), error=True)
+            return
+        self._start_session(session, "串口：{}".format(port), port=port)
+
+    def choose_capture(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self.root, title="选择 MLX90640 capture.bin",
+            filetypes=[("capture.bin", "*.bin"), ("所有文件", "*")])
+        if not path:
+            return
+        self._stop_session()
+        try:
+            session = ThermalSession(
+                capture=path, loop=True, scale=self._scale,
+                delta_c=self._current_delta(),
+                floor_table=self.floor_table_var.get(),
+                replay_rate=self._replay_rate)
+        except Exception as error:
+            self._set_status("创建热像回放会话失败：{}".format(error), error=True)
+            return
+        self._start_session(session, "回放：{}".format(Path(path).name),
+                            capture=path)
+
+    # -- 参数 ---------------------------------------------------------
+    def _current_delta(self) -> float:
+        try:
+            value = float(self.delta_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            value = self._delta
+        value = max(0.1, min(20.0, value))
+        self.delta_var.set("{:.1f}".format(value))
+        self._delta = value
+        return value
+
+    def apply_delta(self) -> None:
+        value = self._current_delta()
+        if self.session is not None:
+            self.session.delta_c = value
+        self._set_status("热点框 Δ℃ = {:.1f}".format(value))
+
+    def apply_floor_table(self) -> None:
+        text = self.floor_table_var.get().strip()
+        if self.session is None:
+            self._set_status("尚未连接热像；楼层表将在连接时使用")
+            return
+        try:
+            table = self.session.set_floor_table(text)
+            self.floor_table_var.set(table.to_text())
+            self._floor_samples.clear()
+        except Exception as error:
+            self._set_status("楼层表无效：{}".format(error), error=True)
+            return
+        self._set_status("楼层表：{}".format(self.floor_table_var.get()))
+
+    def record_floor(self, name: str) -> None:
+        if self.session is None:
+            self._set_status("尚未连接热像", error=True)
+            return
+        try:
+            frame = self.session.latest()
+            if frame is None:
+                self._set_status("还没有热像帧，等画面出来再记录", error=True)
+                return
+            row = float(frame.hotspot.row)
+            samples = self._floor_samples.setdefault(name, [])
+            samples.append(row)
+            ordered = sorted(samples)
+            middle = len(ordered) // 2
+            if len(ordered) % 2:
+                centre = ordered[middle]
+            else:
+                centre = (ordered[middle - 1] + ordered[middle]) / 2.0
+            table = self.session.record_floor(name, centre)
+            self.floor_table_var.set(table.to_text())
+        except Exception as error:
+            self._set_status("记录 {} 失败：{}".format(name, error), error=True)
+            return
+        self._set_status("{}：已记录 {} 次，row 中位数 {:.1f}；{}".format(
+            name, len(samples), centre, self.floor_table_var.get()))
+
+    # -- 显示/保存 -----------------------------------------------------
+    def _tick(self) -> None:
+        if self._closed:
+            return
+        session = self.session
+        if session is not None:
+            try:
+                frame = session.latest()
+            except Exception:
+                frame = None
+            if frame is not None and frame is not self._shown:
+                self._shown = frame
+                try:
+                    rgb = frame.bgr[:, :, ::-1]
+                    photo = self.preview.fit_image(Image.fromarray(rgb))
+                    self.preview.configure(image=photo, text="")
+                except Exception as error:
+                    self._set_status("显示热像失败：{}".format(error), error=True)
+                try:
+                    summary = frame.summary()
+                    self.peak_var.set("{:.2f} ℃".format(summary["peak_c"]))
+                    self.row_var.set("row {:.1f} / col {:.1f}".format(
+                        summary["row"], summary["col"]))
+                    self.floor_now_var.set(frame.floor or "—")
+                    self.ambient_var.set("{:.2f} ℃".format(summary["ambient"]))
+                except Exception:
+                    pass
+            error = session.error()
+            if error is not None and str(error) != self._last_error:
+                self._last_error = str(error)
+                self._set_status("热像异常：{}".format(error), error=True)
+        try:
+            self._after_id = self.root.after(50, self._tick)
+        except tk.TclError:
+            self._after_id = None
+
+    def save_snapshot(self) -> None:
+        if self.session is None:
+            self._set_status("尚未连接热像", error=True)
+            return
+        try:
+            png, meta = self.session.save_snapshot(
+                directory=str(self.thermal_dir), prefix="thermal", temps=False)
+        except Exception as error:
+            self._set_status("保存热像快照失败：{}".format(error), error=True)
+            return
+        self._set_status("已保存：{}（{}）".format(
+            display_path(png), Path(meta).name))
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._after_id is not None:
+            try:
+                self.root.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+        self._stop_session()
+        self.root.destroy()
+
+
 # ---------------------------------------------------------------------------
 # 图形界面启动流程
 # ---------------------------------------------------------------------------
@@ -3596,6 +3953,70 @@ def run_gui_gauge(args, output_root: Path, root) -> int:
     return 0
 
 
+def run_gui_thermal(args, output_root: Path, root) -> int:
+    if not THERMAL_AVAILABLE:
+        messagebox.showerror(
+            "红外热像不可用",
+            "缺少 mlx90640_ros。请先 source devel/setup.bash，并确认包已 catkin_make。")
+        root.destroy()
+        return 1
+    capture = str(getattr(args, "thermal_capture", "") or "").strip()
+    port = str(getattr(args, "thermal_port", "") or "").strip()
+    # --capture 优先；默认串口 /dev/thermal 只在没有回放时使用
+    if capture:
+        port = ""
+
+    session = None
+    source = ""
+    try:
+        if capture:
+            session = ThermalSession(
+                capture=capture, loop=True, scale=args.thermal_scale,
+                delta_c=args.thermal_delta,
+                floor_table=args.thermal_floor_table,
+                replay_rate=args.thermal_replay_rate)
+            source = "回放：{}".format(Path(capture).name)
+        elif port:
+            session = ThermalSession(
+                port=port, scale=args.thermal_scale,
+                delta_c=args.thermal_delta,
+                floor_table=args.thermal_floor_table,
+                replay_rate=args.thermal_replay_rate)
+            source = "串口：{}".format(port)
+        if session is not None:
+            session.start()
+    except Exception as error:
+        if session is not None:
+            try:
+                session.stop()
+            except Exception:
+                pass
+        messagebox.showerror("红外热像启动失败", str(error))
+        root.destroy()
+        return 1
+
+    try:
+        app = ThermalApp(
+            root, session, output_root, source_label=source or "未连接",
+            port=(args.thermal_port or "/dev/thermal"), capture=capture,
+            scale=args.thermal_scale, delta=args.thermal_delta,
+            replay_rate=args.thermal_replay_rate,
+            floor_table_text=args.thermal_floor_table)
+        root.deiconify()
+        root.lift()
+        app.preview.focus_set()
+        root.mainloop()
+    finally:
+        try:
+            if 'app' in locals() and not app._closed:
+                app.close()
+            elif session is not None:
+                session.stop()
+        except Exception:
+            pass
+    return 0
+
+
 def run_gui_photo(args, output_root: Path, root) -> int:
     initial_type = args.type or ""
     while True:
@@ -3670,6 +4091,8 @@ def run_gui(args, output_root: Path) -> int:
         return run_gui_scan(args, output_root, root)
     if mode == MODE_GAUGE:
         return run_gui_gauge(args, output_root, root)
+    if mode == MODE_THERMAL:
+        return run_gui_thermal(args, output_root, root)
     return run_gui_photo(args, output_root, root)
 
 # ---------------------------------------------------------------------------
@@ -4219,6 +4642,64 @@ def run_gauge_cli(args, output_root: Path) -> int:
     return 0
 
 
+def run_thermal_cli(args, output_root: Path) -> int:
+    if not THERMAL_AVAILABLE:
+        print("[photo_capture] 缺少 mlx90640_ros；请先 source devel/setup.bash",
+              file=sys.stderr)
+        return 1
+    capture = str(getattr(args, "thermal_capture", "") or "").strip()
+    port = str(getattr(args, "thermal_port", "") or "").strip()
+    if capture:
+        port = ""
+    if not capture and not port:
+        print("[photo_capture] 红外热像需要 --capture 或 --thermal-port",
+              file=sys.stderr)
+        return 1
+    try:
+        session = ThermalSession(
+            capture=capture or None, port=None if capture else port,
+            loop=True, scale=args.thermal_scale, delta_c=args.thermal_delta,
+            floor_table=args.thermal_floor_table,
+            replay_rate=args.thermal_replay_rate)
+    except Exception as error:
+        print("[photo_capture] 创建热像会话失败：{}".format(error), file=sys.stderr)
+        return 1
+    try:
+        session.start()
+    except Exception as error:
+        session.stop()
+        print("[photo_capture] 启动热像失败：{}".format(error), file=sys.stderr)
+        return 1
+
+    source = "回放：{}".format(capture) if capture else "串口：{}".format(port)
+    print("[photo_capture] 红外热像（命令行）：{}".format(source))
+    print("[photo_capture] Ctrl+C 退出")
+    last = None
+    try:
+        while True:
+            frame = session.latest()
+            if frame is not None and frame is not last:
+                last = frame
+                summary = frame.summary()
+                print("[{}] 峰值 {:.2f}℃ row {:.1f} col {:.1f} | "
+                      "楼层 {} | 环境 {:.2f}℃".format(
+                          datetime.now().strftime("%H:%M:%S"),
+                          summary["peak_c"], summary["row"], summary["col"],
+                          frame.floor or "—", summary["ambient"]))
+            error = session.error()
+            if error is not None:
+                print("[photo_capture] 热像异常：{}".format(error),
+                      file=sys.stderr)
+                return 1
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        print()
+    finally:
+        session.stop()
+        print("[photo_capture] 红外热像已退出")
+    return 0
+
+
 def run_cli(args, output_root: Path) -> int:
     print("[photo_capture] 输出根目录：{}".format(display_path(output_root)))
     print("[photo_capture] 命令行模式（没有图形界面时使用）")
@@ -4230,9 +4711,10 @@ def run_cli(args, output_root: Path) -> int:
         print("  2) 模型测试模式")
         print("  3) 区域扫描（平移拼图）")
         print("  4) 仪表识别（Pose 读温度/湿度表）")
+        print("  5) 红外热像（MLX90640）")
         while True:
             try:
-                choice = input("请选择 [1/2/3/4]（默认 1）：").strip()
+                choice = input("请选择 [1/2/3/4/5]（默认 1）：").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n[photo_capture] 已取消")
                 return 0
@@ -4248,7 +4730,10 @@ def run_cli(args, output_root: Path) -> int:
             if choice == "4":
                 mode = MODE_GAUGE
                 break
-            print("请输入 1 / 2 / 3 / 4")
+            if choice == "5":
+                mode = MODE_THERMAL
+                break
+            print("请输入 1 / 2 / 3 / 4 / 5")
 
     if mode == MODE_DETECT:
         return run_detect_cli(args, output_root)
@@ -4256,6 +4741,8 @@ def run_cli(args, output_root: Path) -> int:
         return run_scan_cli(args, output_root)
     if mode == MODE_GAUGE:
         return run_gauge_cli(args, output_root)
+    if mode == MODE_THERMAL:
+        return run_thermal_cli(args, output_root)
 
     try:
         type_name = args.type or prompt_type_cli(output_root)
@@ -4352,10 +4839,10 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="调用本机摄像头拍照，或加载 YOLO 模型做实时检测。",
     )
-    parser.add_argument("--mode", choices=("ask", "photo", "detect", "scan", "gauge"),
+    parser.add_argument("--mode", choices=("ask", "photo", "detect", "scan", "gauge", "thermal"),
                         default="ask",
                         help="启动模式：ask 每次询问，photo 拍照，detect 模型测试，"
-                             "scan 区域扫描，gauge 仪表识别")
+                             "scan 区域扫描，gauge 仪表识别，thermal 红外热像")
     parser.add_argument("-d", "--output-dir", default=str(DEFAULT_OUTPUT_DIR),
                         help="照片根目录（默认：~/Pictures/photo_capture）")
     parser.add_argument("-t", "--type", default=None,
@@ -4456,6 +4943,20 @@ def parse_args(argv=None):
                         help="湿度量程下限（默认 0）")
     parser.add_argument("--gauge-humidity-max", type=float, default=100.0,
                         help="湿度量程上限（默认 100）")
+
+    # ---- 红外热像（MLX90640） ----
+    parser.add_argument("--thermal-capture", "--capture", dest="thermal_capture", default="",
+                        help="红外热像回放 capture.bin（无硬件测试用）")
+    parser.add_argument("--thermal-port", default="/dev/thermal",
+                        help="红外热像串口（默认 /dev/thermal，实机用）")
+    parser.add_argument("--thermal-scale", type=int, default=12,
+                        help="热像伪彩放大倍数（默认 12）")
+    parser.add_argument("--thermal-delta", type=float, default=2.0,
+                        help="热点框温度差（默认 2.0℃）")
+    parser.add_argument("--thermal-floor-table", default="4F:0-5,3F:6-11,2F:12-17,1F:18-23",
+                        help="楼层表，默认四层等分 4F:0-5,3F:6-11,2F:12-17,1F:18-23（现场必须重录）")
+    parser.add_argument("--thermal-replay-rate", type=float, default=2.0,
+                        help="capture.bin 回放帧率（默认 2Hz）")
     return parser.parse_args(argv)
 
 
