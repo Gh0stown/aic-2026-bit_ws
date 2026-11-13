@@ -17,5 +17,6 @@ install(FILES
   scripts/stitch.py
   scripts/chassis.py
   scripts/gauge.py
+  scripts/thermal_calibration.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

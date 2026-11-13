@@ -20,13 +20,17 @@ def build_parser():
     parser.add_argument("--emissivity", type=float, default=0.95)
     parser.add_argument("--tr-shift", type=float, default=8)
     parser.add_argument("--bad-pixels", action="store_true", help="enable bad-pixel correction")
+    parser.add_argument("--no-mirror-x", dest="mirror_x", action="store_false",
+                        default=True, help="disable the default IR horizontal mirror correction")
     parser.add_argument("--headless", action="store_true", help="do not open GUI windows")
     parser.add_argument("--save-dir", default="~/Pictures/mlx90640")
     parser.add_argument("--save-every", type=int, default=10,
                         help="save every N complete images; 0 disables automatic saving")
     parser.add_argument("--scale", type=int, default=12)
-    parser.add_argument("--tmin", type=float)
-    parser.add_argument("--tmax", type=float)
+    parser.add_argument("--tmin", type=float, default=20.0,
+                        help="fixed color scale minimum in Celsius (default: 20)")
+    parser.add_argument("--tmax", type=float, default=35.0,
+                        help="fixed color scale maximum in Celsius (default: 35)")
     parser.add_argument("--duration", type=float, help="stop after this many wall-clock seconds")
     parser.add_argument("--replay-rate", type=positive_rate, default=2.0,
                         help="capture subpages per second; default 2 => 1 full image/s")
@@ -71,7 +75,8 @@ def run(args):
     if args.tmin is not None and args.tmax is not None and args.tmin >= args.tmax:
         raise ValueError("--tmin must be less than --tmax")
     decoder = core.Decoder(library_path=args.lib or None, emissivity=args.emissivity,
-                           tr_shift=args.tr_shift, bad_pixels=args.bad_pixels)
+                           tr_shift=args.tr_shift, bad_pixels=args.bad_pixels,
+                           mirror_x=args.mirror_x)
     cv2 = None
     if not args.headless:
         import cv2

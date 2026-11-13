@@ -30,10 +30,15 @@ class Sample:
 
 
 class Decoder:
-    """Join two fresh, different subpages in the same native float buffer."""
+    """Join sensor subpages, then orient the complete image for the host.
+
+    Horizontal mirroring defaults on for the robot's current IR/RGB mounting.
+    Native calibration, chess/interleaved subpages and bad-pixel correction
+    always use untouched sensor coordinates. Set mirror_x=False for raw order.
+    """
 
     def __init__(self, library_path=None, emissivity=.95, tr_shift=8,
-                 bad_pixels=False):
+                 bad_pixels=False, mirror_x=True):
         self.emissivity = float(emissivity)
         self.tr_shift = float(tr_shift)
         if not math.isfinite(self.emissivity) or not 0 < self.emissivity <= 1:
@@ -41,6 +46,7 @@ class Decoder:
         if not math.isfinite(self.tr_shift):
             raise ValueError("tr_shift must be finite")
         self.bad_pixels = bool(bad_pixels)
+        self.mirror_x = bool(mirror_x)
         self._lib = ctypes.CDLL(library_path or "libmlx90640.so")
         u16p = ctypes.POINTER(ctypes.c_uint16)
         fp = ctypes.POINTER(ctypes.c_float)
@@ -140,7 +146,10 @@ class Decoder:
         if not np.isfinite(self._temps).all():
             self._clear_subpages()
             raise ValueError("non-finite pixel temperature")
-        sample = Sample(self._temps.copy(), float(ambient.value), device_ms, subpage)
+        # Orient numerical pixels BEFORE hotspot analysis/rendering, rather than
+        # flipping a decorated BGR image (which would reverse text and boxes).
+        oriented = self._temps[:, ::-1] if self.mirror_x else self._temps
+        sample = Sample(oriented.copy(), float(ambient.value), device_ms, subpage)
         # Every output consumes BOTH subpages. Never reuse the other half of
         # the preceding image, and never invalidate a previously returned copy.
         self._clear_subpages()
@@ -192,13 +201,18 @@ def iter_capture_payloads(frames, interval_ms=500):
         yield capture_payload(words, index, interval_ms)
 
 
-def render_image(sample, scale=12, tmin=None, tmax=None, hotspot=None, floor=""):
+def render_image(sample, scale=12, tmin=20.0, tmax=35.0, hotspot=None, floor="",
+                 draw_box=False):
     """Return an annotated BGR uint8 image, without modifying temperatures.
 
     cv2 is imported only here; decoding/replay requires no GUI dependencies.
     Display limits affect colors only, never the raw temperature Sample.
+    The default is a fixed 20..35 C scale; explicit None/None enables auto range.
     ``hotspot`` is any object with a ``box`` of inclusive (r0, c0, r1, c1)
-    pixel bounds; it is drawn as a green rectangle and never changes data.
+    pixel bounds.  The green rectangle is off by default (it covers the hot
+    pixels in calibration work); pass ``draw_box=True`` to restore it.
+    ``floor`` is appended to the bottom caption instead of being drawn over
+    the image, so the thermal frame stays clean.
     """
     import cv2
 
@@ -218,24 +232,19 @@ def render_image(sample, scale=12, tmin=None, tmax=None, hotspot=None, floor="")
     center = (int(col * scale + scale // 2), int(row * scale + scale // 2))
     cv2.drawMarker(image, center, (255, 255, 255), cv2.MARKER_CROSS,
                    max(5, scale), 1)
-    if hotspot is not None:
+    if draw_box and hotspot is not None:
         r0, c0, r1, c1 = hotspot.box
         left, top = int(c0 * scale), int(r0 * scale)
         right, bottom = int((c1 + 1) * scale) - 1, int((r1 + 1) * scale) - 1
         cv2.rectangle(image, (left, top), (right, bottom), (0, 255, 0), 2)
-        if floor:
-            # Keep the label clear of the hottest pixels: above a box with
-            # room, otherwise just below it inside the image. A dark outline
-            # keeps green text readable over hot red pixels.
-            label_y = top - 5 if top >= 18 else min(bottom + 14, 24 * scale - 4)
-            for color, thickness in (((0, 0, 0), 3), ((0, 255, 0), 1)):
-                cv2.putText(image, str(floor), (left, label_y),
-                            cv2.FONT_HERSHEY_SIMPLEX, .50, color, thickness, cv2.LINE_AA)
     # Separate caption avoids covering the actual hotspot/data area.
     image = cv2.copyMakeBorder(image, 0, 42, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
     caption = "Max {:.2f}  Min {:.2f} C".format(float(temps.max()), float(temps.min()))
+    if floor:
+        caption += "  {}".format(floor)
     cv2.putText(image, caption, (4, 24 * scale + 16), cv2.FONT_HERSHEY_SIMPLEX,
                 .40, (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.putText(image, "Ambient {:.2f} C".format(sample.ambient), (4, 24 * scale + 34),
+    label = "Ambient {:.2f} C  Scale {:g}-{:g}".format(sample.ambient, lo, hi)
+    cv2.putText(image, label, (4, 24 * scale + 34),
                 cv2.FONT_HERSHEY_SIMPLEX, .40, (255, 255, 255), 1, cv2.LINE_AA)
     return image

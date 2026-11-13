@@ -97,8 +97,8 @@ def run(rospy):
     scale = int(rospy.get_param("~scale", 12))
     if scale < 1:
         raise ValueError("~scale must be positive")
-    tmin = optional_float(rospy.get_param("~tmin", None))
-    tmax = optional_float(rospy.get_param("~tmax", None))
+    tmin = optional_float(rospy.get_param("~tmin", 20.0))
+    tmax = optional_float(rospy.get_param("~tmax", 35.0))
     if tmin is not None and tmax is not None and tmin >= tmax:
         raise ValueError("~tmin must be less than ~tmax")
     frame_id = str(rospy.get_param("~frame_id", "mlx90640_link")).strip()
@@ -117,7 +117,8 @@ def run(rospy):
         library_path=library,
         emissivity=float(rospy.get_param("~emissivity", 0.95)),
         tr_shift=float(rospy.get_param("~tr_shift", 8)),
-        bad_pixels=bool(rospy.get_param("~bad_pixels", False)))
+        bad_pixels=bool(rospy.get_param("~bad_pixels", False)),
+        mirror_x=bool(rospy.get_param("~mirror_x", True)))
 
     def log(level, message):
         getattr(rospy, "logwarn" if level == "warning" else "loginfo")(message)

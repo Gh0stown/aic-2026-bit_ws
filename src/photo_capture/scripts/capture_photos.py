@@ -55,6 +55,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
@@ -66,6 +67,8 @@ import numpy as np
 _SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
+
+import thermal_calibration as calibration_math
 
 try:  # YOLO 检测模块；缺失时只影响模型测试模式
     import yolo_detect
@@ -93,6 +96,7 @@ except Exception:  # pragma: no cover - 取决于运行环境
 
 try:  # 红外热像；缺失时只影响红外热像模式
     from mlx90640_ros.thermal_session import ThermalSession, FloorTable
+    from mlx90640_ros.hotspot import parse_roi
 
     THERMAL_AVAILABLE = True
 except Exception:  # pragma: no cover - 取决于运行环境
@@ -3313,6 +3317,432 @@ class GaugeApp(object):
         self.root.destroy()
 
 
+def calibration_preview_point(preview, x, y):
+    """Undo the existing centred preview's actual resize; reject letterbox clicks."""
+    image, photo = preview._source_image, preview._display_photo
+    if image is None or photo is None:
+        return None
+    width, height = photo.width(), photo.height()
+    left = (preview.winfo_width() - width) / 2.0
+    top = (preview.winfo_height() - height) / 2.0
+    if not (left <= x < left + width and top <= y < top + height):
+        return None
+    return ((x - left) * image.width / width,
+            (y - top) * image.height / height)
+
+
+def calibration_ir_image(frame, scale, tmin=20.0, tmax=35.0):
+    """Display-only clean IR pixels, without the acquisition renderer's global argmax."""
+    temps = np.asarray(frame.temps)
+    if temps.shape != (24, 32) or not np.isfinite(temps).all():
+        raise ValueError("热像必须是有效的 32×24 温度矩阵")
+    lo = float(temps.min()) if tmin is None else float(tmin)
+    hi = float(temps.max()) if tmax is None else float(tmax)
+    if not np.isfinite([lo, hi]).all() or hi < lo:
+        raise ValueError("热像色标范围无效")
+    values = np.clip((temps - lo) / max(hi - lo, 1e-6), 0, 1)
+    colors = cv2.applyColorMap((values * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    return cv2.resize(colors, (32 * scale, 24 * scale), interpolation=cv2.INTER_NEAREST)
+
+
+class CalibrationWindow(object):
+    """IR/RGB correspondence editor; consumes the main window's cached frames only."""
+
+    def __init__(self, app):
+        self.app = app
+        self.root = tk.Toplevel(app.root)
+        self.root.title("IR → RGB 平面标定")
+        self.root.geometry("{}x{}".format(min(1180, self.root.winfo_screenwidth() - 60),
+                                         min(820, self.root.winfo_screenheight() - 80)))
+        self.root.minsize(820, 620)
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.bind("<Escape>", lambda event: self.close())
+        self._closed = False
+        self._generation = app._source_generation
+        self._live_frame = self._live_rgb = None
+        self._frozen = None
+        self._manual_ir = self._rgb_point = None
+        self._review = False
+        self._validation_uv = None
+        self.points, self.temperatures, self.snapshots = [], [], []
+        self.calibration = app._calibration
+        self._points_rgb_size = None
+        if self.calibration is not None:
+            self.points = [list(p) for p in self.calibration.points]
+            self.temperatures = [None] * len(self.points)
+            self.snapshots = [None] * len(self.points)
+            self._points_rgb_size = self.calibration.rgb_size
+        self.ir_var = tk.StringVar(master=self.root, value="等待 IR")
+        self.rgb_var = tk.StringVar(master=self.root, value="等待 RGB")
+        self.status_var = tk.StringVar(master=self.root, value="首次点选自动冻结同一对画面；下一点请恢复实时")
+        self.state_var = tk.StringVar(master=self.root)
+        self.roi_var = tk.StringVar(master=self.root, value=app.roi_var.get())
+        self.note_var = tk.StringVar(master=self.root,
+                                     value=self.calibration.note if self.calibration else "")
+        self._build_ui()
+        self._refresh_table()
+        self.update_live(app._shown, app._rgb_bgr, app._source_generation)
+
+    def _build_ui(self):
+        body = ttk.Frame(self.root, padding=10)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(1, weight=3)
+        body.rowconfigure(2, weight=1)
+        ttk.Label(body, text="静止、同一楼面采集 6～9 对分散点；点选会冻结画面。楼层仍使用原 IR 行号表。",
+                  style="Capture.Muted.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        for column, (title, var, callback, name) in enumerate((
+                ("IR（点击选像素）", self.ir_var, self._click_ir, "ir_preview"),
+                ("RGB（点击热源中心）", self.rgb_var, self._click_rgb, "rgb_preview"))):
+            panel = ttk.Frame(body, width=380, height=300)
+            panel.grid(row=1, column=column, sticky="nsew", padx=4)
+            panel.grid_propagate(False)
+            panel.columnconfigure(0, weight=1)
+            panel.rowconfigure(1, weight=1)
+            ttk.Label(panel, text=title, style="Capture.Section.TLabel").grid(row=0, column=0, sticky="w")
+            preview = _CapturePreview(panel)
+            preview.grid(row=1, column=0, sticky="nsew")
+            preview.bind("<Button-1>", callback)
+            setattr(self, name, preview)
+            ttk.Label(panel, textvariable=var).grid(row=2, column=0, sticky="w")
+        table_frame = ttk.Frame(body)
+        table_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=8)
+        self.table = ttk.Treeview(table_frame, columns=("index", "ir", "rgb", "temp"),
+                                  show="headings", height=5, selectmode="browse")
+        for key, label, width in (("index", "#", 45), ("ir", "IR (row, col)", 170),
+                                  ("rgb", "RGB (u, v)", 170), ("temp", "温度 ℃", 90)):
+            self.table.heading(key, text=label)
+            self.table.column(key, width=width, anchor="center")
+        bar = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
+        self.table.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        self.table.pack(side="left", fill="both", expand=True)
+        self.table.bind("<<TreeviewSelect>>", self._review_point)
+        tools = ttk.Frame(body)
+        tools.grid(row=3, column=0, columnspan=2, sticky="ew")
+        self.buttons = {}
+        actions = (("自动热点", self.auto_hotspot), ("下一点 / 实时", self.next_point),
+                   ("采集当前点", self.capture_point), ("删除上一点", self.delete_last),
+                   ("清空", self.clear_points), ("计算 H", self.compute),
+                   ("保存", self.save), ("加载", self.load),
+                   ("验证", self.verify), ("关闭", self.close))
+        for index, (text, callback) in enumerate(actions):
+            button = ttk.Button(tools, text=text, command=callback)
+            button.grid(row=index // 5, column=index % 5, sticky="ew", padx=2, pady=2)
+            tools.columnconfigure(index % 5, weight=1)
+            self.buttons[text] = button
+        roi = ttk.Frame(body)
+        roi.grid(row=4, column=0, columnspan=2, sticky="ew", pady=5)
+        ttk.Label(roi, text="ROI r0,c0,r1,c1（半开，空=全图）：").pack(side="left")
+        ttk.Entry(roi, textvariable=self.roi_var, width=22).pack(side="left", fill="x", expand=True)
+        ttk.Button(roi, text="应用 ROI / 重连", command=self.apply_roi).pack(side="left", padx=4)
+        note = ttk.Frame(body)
+        note.grid(row=5, column=0, columnspan=2, sticky="ew")
+        ttk.Label(note, text="备注：").pack(side="left")
+        ttk.Entry(note, textvariable=self.note_var).pack(side="left", fill="x", expand=True)
+        ttk.Label(body, textvariable=self.state_var, style="Capture.Section.TLabel").grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        status = ttk.Label(body, textvariable=self.status_var, wraplength=1000, justify="left")
+        status.grid(row=7, column=0, columnspan=2, sticky="ew")
+        body.bind("<Configure>", lambda event: status.configure(wraplength=max(300, event.width - 30)))
+
+    def _pair(self):
+        if self._frozen is not None:
+            return self._frozen
+        if self._live_frame is None or self._live_rgb is None:
+            raise ValueError("请等待 IR 和 RGB 都有有效画面")
+        return self._live_frame, self._live_rgb
+
+    def _freeze(self):
+        if self._frozen is None:
+            frame, rgb = self._pair()
+            self._frozen = frame, rgb.copy()
+        return self._frozen
+
+    def _ir_point(self, frame):
+        if self._manual_ir is not None:
+            return self._manual_ir
+        return float(frame.hotspot.row), float(frame.hotspot.col)
+
+    def update_live(self, frame, rgb, generation):
+        if self._closed:
+            return
+        if generation != self._generation:
+            self.source_changed(generation)
+        self._live_frame, self._live_rgb = frame, rgb
+        self._render()
+
+    def source_changed(self, generation):
+        self._generation = generation
+        self._live_frame = self._live_rgb = self._frozen = None
+        self._manual_ir = self._rgb_point = self._validation_uv = None
+        self._review = False
+        self.ir_preview.configure(image="", text="等待新会话 IR…")
+        self.ir_preview._source_image = None
+        self.ir_preview._display_photo = None
+        self.status_var.set("会话或 ROI 已变化；待选点已清除，等待新画面")
+
+    def _render(self):
+        try:
+            frame, rgb = self._pair()
+            row, col = self._ir_point(frame)
+            ir = calibration_ir_image(frame, self.app._scale, *self.app._display_limits())
+            rgb_image = rgb.copy()
+            center = (int((col + .5) * self.app._scale), int((row + .5) * self.app._scale))
+            cv2.drawMarker(ir, center, (255, 255, 255), cv2.MARKER_CROSS, 13, 1)
+            if self._rgb_point is not None:
+                uv = tuple(int(round(value)) for value in self._rgb_point)
+                cv2.drawMarker(rgb_image, uv, (0, 255, 0), cv2.MARKER_CROSS, 17, 2)
+            if self._validation_uv is not None:
+                uv = tuple(int(round(value)) for value in self._validation_uv)
+                cv2.circle(rgb_image, uv, 9, (0, 255, 255), 2)
+            for number, (r, c, u, v) in enumerate(self.points, 1):
+                xy = (int((c + .5) * self.app._scale), int((r + .5) * self.app._scale))
+                cv2.putText(ir, str(number), xy, cv2.FONT_HERSHEY_SIMPLEX, .4, (255, 255, 255), 1)
+                cv2.putText(rgb_image, str(number), (int(u), int(v)), cv2.FONT_HERSHEY_SIMPLEX,
+                            .5, (255, 255, 255), 1)
+            for preview, image in ((self.ir_preview, ir), (self.rgb_preview, rgb_image)):
+                photo = preview.fit_image(self.app._to_pil(image))
+                preview.configure(image=photo, text="")
+            r, c = int(np.clip(round(row), 0, 23)), int(np.clip(round(col), 0, 31))
+            self.ir_var.set("{} r={:.2f} c={:.2f}  {:.2f}℃  {}".format(
+                "手动" if self._manual_ir is not None else "自动", row, col,
+                float(frame.hotspot.peak_c if self._manual_ir is None else frame.temps[r, c]),
+                "已冻结" if self._frozen else "实时"))
+            self.rgb_var.set("RGB {}×{}  {}".format(rgb.shape[1], rgb.shape[0],
+                "未选点" if self._rgb_point is None else "u={:.1f} v={:.1f}".format(*self._rgb_point)))
+        except ValueError:
+            for preview in (self.ir_preview, self.rgb_preview):
+                preview.configure(image="", text="等待有效 IR / RGB 画面…")
+                preview._source_image = None
+                preview._display_photo = None
+            self.ir_var.set("等待有效 IR")
+            self.rgb_var.set("等待有效 RGB")
+        self._update_state()
+
+    def _click_ir(self, event):
+        point = calibration_preview_point(self.ir_preview, event.x, event.y)
+        if point is None:
+            return
+        try:
+            self._freeze()
+            col, row = int(point[0] / self.app._scale), int(point[1] / self.app._scale)
+            if not (0 <= row < 24 and 0 <= col < 32):
+                return
+            self._manual_ir = float(row), float(col)
+            self._review = False
+            self._validation_uv = None
+            self.status_var.set("已冻结本对画面；手动 IR 点已选，请点 RGB 对应位置")
+            self._render()
+        except ValueError as error:
+            self.status_var.set(str(error))
+
+    def _click_rgb(self, event):
+        point = calibration_preview_point(self.rgb_preview, event.x, event.y)
+        if point is None:
+            return
+        try:
+            self._freeze()
+            self._rgb_point = float(int(point[0])), float(int(point[1]))
+            self._review = False
+            self._validation_uv = None
+            self.status_var.set("已冻结本对画面；核对 IR/RGB 后点击采集当前点")
+            self._render()
+        except ValueError as error:
+            self.status_var.set(str(error))
+
+    def auto_hotspot(self):
+        self._manual_ir = None
+        self._review = False
+        self._validation_uv = None
+        self._render()
+
+    def next_point(self):
+        self._frozen = self._manual_ir = self._rgb_point = self._validation_uv = None
+        self._review = False
+        self.table.selection_remove(self.table.selection())
+        self.status_var.set("已恢复实时；移动热源并稳定后选下一对点")
+        self._render()
+
+    def _context(self):
+        frame, rgb = self._pair()
+        context = self.app._calibration_context(frame, rgb)
+        if context != self.app._calibration_context():
+            raise ValueError("当前会话尺寸或镜像已改变，请刷新画面后重新采点")
+        if self.points and self._points_rgb_size != context["rgb_size"]:
+            raise ValueError("RGB 尺寸已改变，请清空旧点或加载匹配的标定文件")
+        return context
+
+    def capture_point(self):
+        try:
+            if self._review:
+                raise ValueError("正在回看已有点，请先点击下一点 / 实时")
+            frame, rgb = self._freeze()
+            context = self._context()
+            if self._rgb_point is None:
+                raise ValueError("请先在 RGB 预览点击热源中心")
+            row, col = self._ir_point(frame)
+            u, v = self._rgb_point
+            point = [float(row), float(col), float(u), float(v)]
+            if any(np.allclose(point[:2], p[:2]) or np.allclose(point[2:], p[2:]) for p in self.points):
+                raise ValueError("IR 或 RGB 点重复，请移动热源并选取不同位置")
+            self.points.append(point)
+            self._points_rgb_size = context["rgb_size"]
+            r, c = int(np.clip(round(row), 0, 23)), int(np.clip(round(col), 0, 31))
+            self.temperatures.append(float(frame.hotspot.peak_c if self._manual_ir is None
+                                           else frame.temps[r, c]))
+            self.snapshots.append((frame, rgb.copy()))
+            self._invalidate()
+            self._refresh_table()
+            self.status_var.set("已采集第 {} 对；点击下一点 / 实时后继续".format(len(self.points)))
+        except (ValueError, TypeError) as error:
+            self.status_var.set(str(error))
+
+    def _invalidate(self):
+        self.calibration = None
+        self._validation_uv = None
+        self.app._set_calibration(None)
+
+    def _refresh_table(self):
+        self.table.delete(*self.table.get_children())
+        for index, (point, temp) in enumerate(zip(self.points, self.temperatures)):
+            self.table.insert("", "end", iid=str(index), values=(index + 1,
+                "{:.2f}, {:.2f}".format(*point[:2]), "{:.1f}, {:.1f}".format(*point[2:]),
+                "--" if temp is None else "{:.2f}".format(temp)))
+        self._update_state()
+
+    def _update_state(self):
+        valid = self.calibration is not None
+        self.state_var.set("点数 {}/4+  |  RMS {} px  |  H {}".format(len(self.points),
+            "--" if not valid else "{:.2f}".format(self.calibration.rms_px),
+            "有效" if valid else "未计算 / 已失效"))
+        self.buttons["计算 H"].configure(state="normal" if len(self.points) >= 4 else "disabled")
+        for text in ("保存", "验证"):
+            self.buttons[text].configure(state="normal" if valid else "disabled")
+
+    def _review_point(self, _event=None):
+        selected = self.table.selection()
+        if not selected:
+            return
+        index = int(selected[0])
+        if index >= len(self.points):
+            return
+        try:
+            snapshot = self.snapshots[index] or self._freeze()
+        except ValueError as error:
+            self.status_var.set("无法回看：{}".format(error))
+            return
+        self._manual_ir = tuple(self.points[index][:2])
+        self._rgb_point = tuple(self.points[index][2:])
+        self._frozen = snapshot
+        self._review = True
+        self._validation_uv = None
+        self.status_var.set("回看点 {}{}；继续采集请点下一点 / 实时".format(index + 1,
+            "（加载文件无历史图，坐标叠在当前画面）" if self.snapshots[index] is None else ""))
+        self._render()
+
+    def delete_last(self):
+        if self.points:
+            self.points.pop()
+            self.temperatures.pop()
+            self.snapshots.pop()
+            self._invalidate()
+            self._refresh_table()
+            self.next_point()
+
+    def clear_points(self):
+        self.points.clear()
+        self.temperatures.clear()
+        self.snapshots.clear()
+        self._points_rgb_size = None
+        self._invalidate()
+        self._refresh_table()
+        self.next_point()
+
+    def compute(self):
+        try:
+            context = self._context()
+            result = calibration_math.fit_calibration(self.points, context["rgb_size"],
+                mirror_x=context["mirror_x"], scale=self.app._scale, note=self.note_var.get())
+            self.calibration = result
+            self.app._set_calibration(result)
+            self.status_var.set("H 已计算；{}。请验证投影后保存".format(
+                "RMS 超过 3px，请检查点对" if result.rms_px >= 3 else "RMS {:.2f}px".format(result.rms_px)))
+            self._update_state()
+        except (ValueError, cv2.error) as error:
+            self._invalidate()
+            self._update_state()
+            self.status_var.set("计算失败：{}".format(error))
+
+    def save(self):
+        try:
+            if self.calibration is None:
+                raise ValueError("请先计算有效 H")
+            context = self.app._calibration_context()
+            if context["rgb_size"] != self.calibration.rgb_size or context["mirror_x"] != self.calibration.mirror_x:
+                raise ValueError("当前会话与 H 不匹配，请重新标定")
+            # Save the matrix the user just verified, not a fresh refit of a loaded H.
+            result = replace(self.calibration, note=self.note_var.get(), scale=self.app._scale)
+            self.app.calibration_path.parent.mkdir(parents=True, exist_ok=True)
+            calibration_math.save_calibration(self.app.calibration_path, result)
+            self.calibration = result
+            self.app._set_calibration(result)
+            self.status_var.set("已保存：{}".format(display_path(self.app.calibration_path)))
+        except (ValueError, OSError, cv2.error) as error:
+            self.status_var.set("保存失败：{}".format(error))
+
+    def load(self):
+        try:
+            context = self.app._calibration_context()
+            result = calibration_math.load_calibration(self.app.calibration_path, **context)
+            self.points = [list(p) for p in result.points]
+            self.temperatures = [None] * len(self.points)
+            self.snapshots = [None] * len(self.points)
+            self._points_rgb_size = result.rgb_size
+            self.calibration = result
+            self.note_var.set(result.note)
+            self.next_point()
+            self.app._set_calibration(result)
+            self._refresh_table()
+            self.status_var.set("已加载 {}；RMS {:.2f}px{}".format(display_path(self.app.calibration_path),
+                result.rms_px, "（误差偏大，请复核）" if result.rms_px >= 3 else ""))
+        except (ValueError, OSError) as error:
+            self.status_var.set("加载失败，未使用该文件：{}".format(error))
+
+    def verify(self):
+        try:
+            if self.calibration is None:
+                raise ValueError("请先计算或加载 H")
+            context = self._context()
+            if context["rgb_size"] != self.calibration.rgb_size:
+                raise ValueError("RGB 尺寸与 H 不匹配")
+            frame, rgb = self._freeze()
+            row, col = self._ir_point(frame)
+            u, v = calibration_math.project(self.calibration.H, col, row)
+            if not (0 <= u < rgb.shape[1] and 0 <= v < rgb.shape[0]):
+                self._validation_uv = None
+                raise ValueError("投影 ({:.1f}, {:.1f}) 在 RGB 画面外".format(u, v))
+            self._validation_uv = u, v
+            self.status_var.set("验证投影 RGB ({:.1f}, {:.1f})；请目视确认同一个热源，RMS {:.2f}px".format(
+                u, v, self.calibration.rms_px))
+            self._render()
+        except ValueError as error:
+            self.status_var.set("验证失败：{}".format(error))
+
+    def apply_roi(self):
+        if self.app.apply_calibration_roi(self.roi_var.get()):
+            self.roi_var.set(self.app.roi_var.get())
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        if self.app.calibration_window is self:
+            self.app.calibration_window = None
+        self.root.destroy()
+
+
 class ThermalApp(object):
     """红外热像窗口：MLX90640 热图、楼层标定、热点读数和快照。"""
 
@@ -3326,6 +3756,17 @@ class ThermalApp(object):
         self._camera_error = str(camera_error or "")
         self.output_root = Path(output_root)
         self.thermal_dir = self.output_root / "红外热像"
+        self.calibration_path = self.thermal_dir / "calibration.json"
+        self.calibration_window = None
+        self._calibration = None
+        self._calibration_checked = False
+        self._source_generation = 0
+        # Every session this GUI creates explicitly uses the same IR orientation.
+        self._mirror_x = True
+        self._roi = getattr(session, "roi", None) if session is not None else None
+        self.roi_var = tk.StringVar(master=root, value="" if self._roi is None else
+                                    ",".join(str(value) for value in self._roi))
+        self.calibration_var = tk.StringVar(master=root, value="IR→RGB：未标定（楼层沿用 IR 行号表）")
         self._scale = int(scale)
         self._delta = float(delta)
         self._replay_rate = float(replay_rate)
@@ -3382,6 +3823,9 @@ class ThermalApp(object):
         ttk.Label(primary, textvariable=self.source_var, font=self._bold_font,
                   wraplength=230, justify="left").pack(anchor="w", pady=(0, 8))
         _action(primary, "保存快照 (S)", self.save_snapshot, primary=True)
+        _action(primary, "标定 IR → RGB…", self.open_calibration)
+        ttk.Label(primary, textvariable=self.calibration_var, wraplength=230,
+                  style="Capture.Muted.TLabel").pack(anchor="w", pady=(0, 6))
         ttk.Checkbutton(primary, text="同时保存 IR+RGB 拼图",
                         variable=self.save_dual_var).pack(anchor="w", pady=(0, 8))
         ttk.Label(primary, text="预览画面", style="Capture.Section.TLabel").pack(
@@ -3438,6 +3882,10 @@ class ThermalApp(object):
             textvariable=self.delta_var)
         self.delta_spin.pack(anchor="w", pady=(2, 5))
         _action(params, "应用热点参数", self.apply_delta)
+        ttk.Label(params, text="搜索 ROI（r0,c0,r1,c1；半开，空=全图）",
+                  style="Capture.Muted.TLabel", wraplength=225).pack(anchor="w")
+        ttk.Entry(params, textvariable=self.roi_var).pack(fill="x", pady=(2, 5))
+        _action(params, "应用 ROI / 重连热像", lambda: self.apply_calibration_roi(self.roi_var.get()))
         ttk.Label(params, text="保存位置", style="Capture.Muted.TLabel").pack(
             anchor="w", pady=(8, 1))
         ttk.Label(params, text=display_path(self.thermal_dir),
@@ -3468,11 +3916,124 @@ class ThermalApp(object):
         except tk.TclError:
             pass
 
+    # -- IR/RGB 标定（只消费已有预览，不另开设备） ----------------------
+    def open_calibration(self):
+        if self.calibration_window is not None and not self.calibration_window._closed:
+            self.calibration_window.root.lift()
+            return
+        self.calibration_window = CalibrationWindow(self)
+
+    def _display_limits(self):
+        session = self.session
+        return (getattr(session, "tmin", 20.0), getattr(session, "tmax", 35.0))
+
+    def _calibration_context(self, frame=None, rgb=None):
+        frame = self._shown if frame is None else frame
+        rgb = self._rgb_bgr if rgb is None else rgb
+        if frame is None or rgb is None:
+            raise ValueError("等待 IR 和 RGB 画面后才能标定 / 加载")
+        if np.asarray(frame.temps).shape != (24, 32):
+            raise ValueError("当前 IR 尺寸不是 32×24")
+        return dict(rgb_size=(rgb.shape[1], rgb.shape[0]), ir_size=(32, 24),
+                    mirror_x=self._mirror_x)
+
+    def _set_calibration(self, calibration):
+        self._calibration = calibration
+        self.calibration_var.set("IR→RGB：未标定（楼层沿用 IR 行号表）" if calibration is None else
+            "IR→RGB H 有效，RMS {:.2f}px{}；楼层仍用 IR 行号表".format(
+                calibration.rms_px, "（需复核）" if calibration.rms_px >= 3 else ""))
+        self._render_preview()
+
+    def _check_calibration(self):
+        if self._shown is None or self._rgb_bgr is None:
+            return
+        context = self._calibration_context()
+        if self._calibration is not None:
+            if (self._calibration.rgb_size != context["rgb_size"] or
+                    self._calibration.ir_size != context["ir_size"] or
+                    self._calibration.mirror_x != context["mirror_x"]):
+                self._set_calibration(None)
+                if self.calibration_window is not None:
+                    self.calibration_window.calibration = None
+                    self.calibration_window._update_state()
+                self._set_status("画面尺寸或镜像已改变，旧 H 已停用，请重新标定 / 加载", error=True)
+        if not self._calibration_checked:
+            self._calibration_checked = True
+            if self.calibration_path.exists():
+                try:
+                    self._set_calibration(calibration_math.load_calibration(self.calibration_path, **context))
+                except (ValueError, OSError) as error:
+                    self._set_status("标定文件未加载：{}".format(error), error=True)
+
+    def _project_rgb(self, frame=None, rgb=None):
+        rgb = self._rgb_bgr if rgb is None else rgb
+        frame = self._shown if frame is None else frame
+        if rgb is None or frame is None or self._calibration is None:
+            return rgb
+        calibration = self._calibration
+        if calibration.rgb_size != (rgb.shape[1], rgb.shape[0]):
+            return rgb
+        image = rgb.copy()
+        try:
+            u, v = calibration_math.project(calibration.H, frame.hotspot.col, frame.hotspot.row)
+            if 0 <= u < rgb.shape[1] and 0 <= v < rgb.shape[0]:
+                cv2.circle(image, (round(u), round(v)), 10, (0, 255, 255), 2)
+                text = "IR->RGB ({:.1f}, {:.1f})".format(u, v)
+                cv2.putText(image, text, (max(2, min(round(u) + 12, rgb.shape[1] - 240)),
+                            max(18, min(round(v) - 12, rgb.shape[0] - 8))),
+                            cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 255, 255), 1, cv2.LINE_AA)
+            else:
+                cv2.putText(image, "IR projection outside RGB", (8, 24),
+                            cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 180, 255), 1)
+        except ValueError:
+            cv2.putText(image, "IR projection invalid", (8, 24), cv2.FONT_HERSHEY_SIMPLEX,
+                        .5, (0, 180, 255), 1)
+        return image
+
+    def apply_calibration_roi(self, text):
+        try:
+            roi = parse_roi(text)
+        except ValueError as error:
+            self._set_status("ROI 无效：{}".format(error), error=True)
+            return False
+        current = self.session
+        normalized = "" if roi is None else ",".join(str(value) for value in roi)
+        if current is None:
+            self._roi = roi
+            self.roi_var.set(normalized)
+            self._set_status("ROI 将在下一次连接时使用：{}".format(normalized or "全图"))
+            return True
+        # Snapshot PUBLIC constructor options before stopping. A stopped session
+        # is never kept around as an alternate decoder or capture source.
+        options = dict(port=current.port or None, capture=current.capture or None,
+                       baud=current.baud, scale=current.scale, tmin=current.tmin,
+                       tmax=current.tmax, delta_c=self._current_delta(), roi=roi,
+                       floor_table=current.floor_table.to_text(), replay_rate=current.replay_rate,
+                       loop=current.loop, mirror_x=self._mirror_x)
+        source_label = self._source_label
+        self._stop_session()
+        try:
+            session = ThermalSession(**options)
+            if not self._start_session(session, source_label, port=options["port"] or "",
+                                       capture=options["capture"] or ""):
+                return False
+        except Exception as error:
+            self._set_status("ROI 重连失败（旧画面已清空）：{}".format(error), error=True)
+            return False
+        self._roi = roi
+        self.roi_var.set(normalized)
+        self._set_status("ROI 已应用并重建热像会话：{}".format(normalized or "全图"))
+        return True
+
     # -- 生命周期 -----------------------------------------------------
     def _stop_session(self) -> None:
         session = self.session
         self.session = None
         self._shown = None
+        self._thermal_bgr = None
+        self._source_generation += 1
+        if self.calibration_window is not None:
+            self.calibration_window.source_changed(self._source_generation)
         if session is not None:
             try:
                 session.stop()
@@ -3517,8 +4078,8 @@ class ThermalApp(object):
         try:
             session = ThermalSession(
                 port=port, scale=self._scale, delta_c=self._current_delta(),
-                floor_table=self.floor_table_var.get(),
-                replay_rate=self._replay_rate)
+                floor_table=self.floor_table_var.get(), roi=self._roi,
+                replay_rate=self._replay_rate, mirror_x=self._mirror_x)
         except Exception as error:
             self._set_status("创建热像串口会话失败：{}".format(error), error=True)
             return
@@ -3535,8 +4096,8 @@ class ThermalApp(object):
             session = ThermalSession(
                 capture=path, loop=True, scale=self._scale,
                 delta_c=self._current_delta(),
-                floor_table=self.floor_table_var.get(),
-                replay_rate=self._replay_rate)
+                floor_table=self.floor_table_var.get(), roi=self._roi,
+                replay_rate=self._replay_rate, mirror_x=self._mirror_x)
         except Exception as error:
             self._set_status("创建热像回放会话失败：{}".format(error), error=True)
             return
@@ -3634,7 +4195,7 @@ class ThermalApp(object):
         if self._closed:
             return
         thermal = self._thermal_bgr
-        rgb = self._rgb_bgr
+        rgb = self._project_rgb()
         mode = self.view_var.get()
         if mode == "rgb" and rgb is None:
             mode = "thermal"
@@ -3670,9 +4231,24 @@ class ThermalApp(object):
                 frame = session.latest()
             except Exception:
                 frame = None
+            if frame is not None and time.monotonic() - frame.monotonic > 3.0:
+                frame = None
+                if self._shown is not None:
+                    self._shown = None
+                    self._thermal_bgr = None
+                    changed = True
+                    self._set_status("热像超过 3 秒未更新，暂停采点 / 投影", error=True)
             if frame is not None and frame is not self._shown:
                 self._shown = frame
-                self._thermal_bgr = frame.bgr
+                # Reuse the acquired pixels/caption, but draw the ROI hotspot
+                # in this GUI; the lower-level white marker is global argmax.
+                self._thermal_bgr = frame.bgr.copy()
+                clean = calibration_ir_image(frame, self._scale, *self._display_limits())
+                self._thermal_bgr[:clean.shape[0], :clean.shape[1]] = clean
+                cv2.drawMarker(self._thermal_bgr,
+                    (int((frame.hotspot.col + .5) * self._scale),
+                     int((frame.hotspot.row + .5) * self._scale)),
+                    (255, 255, 255), cv2.MARKER_CROSS, 13, 1)
                 changed = True
                 try:
                     summary = frame.summary()
@@ -3705,11 +4281,16 @@ class ThermalApp(object):
                     except Exception:
                         pass
                     self.camera = None
-                    self._last_camera_error = "白光摄像头没有画面（已停止读取）"
+                    self._rgb_bgr = None
+                    changed = True
+                    self._last_camera_error = "白光摄像头没有画面（已停止读取，暂停标定采点）"
                     self._set_status(self._last_camera_error, error=True)
 
         if changed:
+            self._check_calibration()
             self._render_preview()
+        if self.calibration_window is not None:
+            self.calibration_window.update_live(self._shown, self._rgb_bgr, self._source_generation)
         try:
             self._after_id = self.root.after(50, self._tick)
         except tk.TclError:
@@ -3740,7 +4321,7 @@ class ThermalApp(object):
         dual_path = None
         if self.save_dual_var.get() and self._rgb_bgr is not None:
             try:
-                image = self._compose_dual(frame.bgr, self._rgb_bgr, height=720)
+                image = self._compose_dual(frame.bgr, self._project_rgb(frame), height=720)
                 dual_path = png.with_name(png.stem + "_rgb.png")
                 image.save(str(dual_path))
             except Exception as error:
@@ -3765,6 +4346,8 @@ class ThermalApp(object):
             except tk.TclError:
                 pass
             self._after_id = None
+        if self.calibration_window is not None:
+            self.calibration_window.close()
         self._stop_session()
         if self.camera is not None:
             try:

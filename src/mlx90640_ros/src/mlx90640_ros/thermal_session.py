@@ -136,9 +136,9 @@ class ThermalSession:
     """
 
     def __init__(self, port=None, capture=None, baud=460800, scale=12,
-                 tmin=None, tmax=None, delta_c=2.0, roi=None,
+                 tmin=20.0, tmax=35.0, delta_c=2.0, roi=None,
                  library_path=None, floor_table=None, replay_rate=2.0,
-                 loop=True):
+                 loop=True, mirror_x=True):
         port = str(port or "").strip()
         capture = str(capture or "").strip()
         if bool(port) == bool(capture):
@@ -167,7 +167,7 @@ class ThermalSession:
                        else FloorTable.from_text(floor_table or ""))
         self._decoder = core.Decoder(library_path=library_path,
                                      emissivity=0.95, tr_shift=8.0,
-                                     bad_pixels=False)
+                                     bad_pixels=False, mirror_x=mirror_x)
         self._lock = threading.Lock()
         self._latest = None
         self._error = None

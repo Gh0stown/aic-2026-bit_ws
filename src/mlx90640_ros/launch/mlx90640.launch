@@ -6,9 +6,10 @@
   <arg name="emissivity" default="0.95" />
   <arg name="tr_shift" default="8" />
   <arg name="bad_pixels" default="false" />
+  <arg name="mirror_x" default="true" />
   <arg name="scale" default="12" />
-  <arg name="tmin" default="" />
-  <arg name="tmax" default="" />
+  <arg name="tmin" default="20" />
+  <arg name="tmax" default="35" />
   <arg name="frame_id" default="mlx90640_link" />
   <arg name="capture_file" default="" />
   <arg name="loop" default="false" />
@@ -25,6 +26,7 @@
       <param name="emissivity" value="$(arg emissivity)" type="double" />
       <param name="tr_shift" value="$(arg tr_shift)" type="double" />
       <param name="bad_pixels" value="$(arg bad_pixels)" type="bool" />
+      <param name="mirror_x" value="$(arg mirror_x)" type="bool" />
       <param name="scale" value="$(arg scale)" type="int" />
       <param name="tmin" value="$(arg tmin)" type="str" />
       <param name="tmax" value="$(arg tmax)" type="str" />

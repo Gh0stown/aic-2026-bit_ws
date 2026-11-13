@@ -161,12 +161,15 @@ class RenderBoxTests(unittest.TestCase):
         temps = gaussian(12.0, 16.0)
         hotspot = find_hotspot(temps, delta_c=2.0)
         image = render_image(Sample(temps, 29.0, 0, 1), scale=12,
-                             hotspot=hotspot, floor="2F")
+                             hotspot=hotspot, floor="2F", draw_box=True)
         self.assertEqual(image.shape, (24 * 12 + 42, 32 * 12, 3))
         green = (image[:, :, 1] > 200) & (image[:, :, 0] < 100) & (image[:, :, 2] < 100)
         self.assertTrue(green.any())
-        plain = render_image(Sample(temps, 29.0, 0, 1), scale=12)
+        plain = render_image(Sample(temps, 29.0, 0, 1), scale=12,
+                             hotspot=hotspot, floor="2F")
         self.assertEqual(plain.shape, image.shape)
+        no_green = (plain[:, :, 1] > 200) & (plain[:, :, 0] < 100) & (plain[:, :, 2] < 100)
+        self.assertFalse(no_green.any())
 
 
 @unittest.skipUnless(os.environ.get("MLX90640_LIBRARY"),

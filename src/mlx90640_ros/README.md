@@ -73,14 +73,17 @@ sudo usermod -aG dialout "$USER"
 | `emissivity` | 0.95 | 发射率，范围 (0,1] |
 | `tr_shift` | 8.0 | 反射温度使用 Ta−tr_shift |
 | `bad_pixels` | false | 厂商 broken/outlier 坏点修正 |
+| `mirror_x` | true | 解算完成后将温度矩阵左右镜像，适配当前 IR/RGB 安装方向；false 恢复传感器原始列顺序 |
 | `scale` | 12 | 伪彩图放大倍数，不影响温度矩阵 |
-| `tmin` / `tmax` | 自动 | 显示色标，不改变真实温度 |
+| `tmin` / `tmax` | 20℃ / 35℃ | 固定显示色标，不随当前帧最高/最低温变化，不改变真实温度 |
 | `capture_file` | 空 | 非空则回放，不打开串口 |
 | `replay_rate` | 2.0 | 回放子页/秒，不是完整图/秒 |
 | `loop` | false | 回放是否循环 |
 | `floor_map` | 空 | 行号→楼层标定表，如 `1F:16-23,2F:8-15,3F:0-7`（行含端点、不可重叠） |
 | `hotspot_delta` | 2.0 | 比峰值低不超过该 ℃ 的连通像素算同一热点 |
 | `roi` | 空 | 只在 `r0,c0,r1,c1`（半开）内找热点，用于排除背景 |
+
+GUI 会话、独立查看器和 ROS 热图默认统一使用固定 **20～35℃** 色标，底部 `Scale 20-35` 显示色标范围；`Max`/`Min` 仍显示实际测得温度。按当前热源约 30℃留出上限余量；低于 20℃或高于 35℃仅颜色饱和，不裁剪原始温度、热点坐标或保存数据。独立查看器可用 `--tmin`/`--tmax` 调整，ROS 用 `tmin:=`/`tmax:=` 调整。仅显式传入两个空值（ROS）或两个 `None`（Python）时才恢复自动色标。此改动不改变热点框的相对温差阈值。
 
 ## 4. ROS 数据接口
 
@@ -95,7 +98,11 @@ sudo usermod -aG dialout "$USER"
 
 同批消息使用相同 ROS 主机接收时间与 frame_id，不把板端毫秒数冒充 ROS 时间。温度图单位特意为摄氏度（不是 K）；伪彩图只供观察，算法应读取 `temperature_image`。
 
-图像坐标 row=0..23、col=0..31，保持传感器原始方向，不自动旋转/镜像；安装方向、视场和楼层映射需现场标定。未标定安装位姿，因此不发布 `base_link → mlx90640_link`，也不提供虚假的 CameraInfo。
+图像坐标 row=0..23、col=0..31。针对当前 IR 与 RGB 左右相反的安装方式，默认在完整温度图解算和坏点修正后进行水平镜像（新列号=31−原列号）；不翻转原始串口字节或子页缓冲，不改温度值。GUI 会话、独立查看器、ROS 温度矩阵、热点坐标/框及新保存的 PNG/JSON 都使用同一修正方向；先修正温度矩阵再画文字，文字不会反向，RGB 不作修改。上下行号不变，按行标定的楼层表无需因此重记；左右 ROI 必须按修正后的图重新核对（半开列范围 `[c0,c1)` 对应 `[32-c1,32-c0)`）。
+
+此设置只纠正左右方向，不代表 IR/RGB 已做视场、尺度、视差或像素配准；历史截图不会被改写。如果安装方向改变，可用 `mirror_x:=false`（ROS）、`--no-mirror-x`（独立查看器）或 `ThermalSession(..., mirror_x=False)` / `Decoder(..., mirror_x=False)`（Python）恢复旧方向。`ThermalSession.process(sample)` 接收已定向的 Sample，不会再次镜像。
+
+安装位姿、视场和楼层映射仍需现场标定。未标定安装位姿，因此不发布 `base_link → mlx90640_link`，也不提供虚假的 CameraInfo。
 
 ### 4.1 热点与楼层（`hotspot`）
 
