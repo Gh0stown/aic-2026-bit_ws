@@ -3318,9 +3318,12 @@ class ThermalApp(object):
 
     def __init__(self, root, session, output_root, source_label="",
                  port="/dev/thermal", capture="", scale=12, delta=2.0,
-                 replay_rate=2.0, floor_table_text=""):
+                 replay_rate=2.0, floor_table_text="", camera=None,
+                 camera_error=""):
         self.root = root
         self.session = session
+        self.camera = camera
+        self._camera_error = str(camera_error or "")
         self.output_root = Path(output_root)
         self.thermal_dir = self.output_root / "红外热像"
         self._scale = int(scale)
@@ -3333,6 +3336,10 @@ class ThermalApp(object):
         self._shown = None
         self._last_error = None
         self._floor_samples = {}
+        self._thermal_bgr = None
+        self._rgb_bgr = None
+        self._rgb_failures = 0
+        self._last_camera_error = ""
         self._bold_font = tkfont.Font(root=root, size=12, weight="bold")
 
         table_text = floor_table_text or "4F:0-5,3F:6-11,2F:12-17,1F:18-23"
@@ -3352,6 +3359,7 @@ class ThermalApp(object):
         self.port_var = tk.StringVar(value=port or "")
         self.floor_table_var = tk.StringVar(value=table_text)
         self.delta_var = tk.StringVar(value="{:.1f}".format(self._delta))
+        self.view_var = tk.StringVar(value="both")
         self.status_var = tk.StringVar(
             value="等待热像帧…" if session is not None else "未连接")
 
@@ -3360,6 +3368,8 @@ class ThermalApp(object):
         self.root.title("红外热像 - MLX90640")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.minsize(700, 500)
+        if self._camera_error:
+            self._set_status(self._camera_error, error=True)
         self._tick()
 
     # -- 界面 ---------------------------------------------------------
@@ -3371,6 +3381,17 @@ class ThermalApp(object):
         ttk.Label(primary, textvariable=self.source_var, font=self._bold_font,
                   wraplength=230, justify="left").pack(anchor="w", pady=(0, 8))
         _action(primary, "保存快照 (S)", self.save_snapshot, primary=True)
+        ttk.Label(primary, text="预览画面", style="Capture.Section.TLabel").pack(
+            anchor="w", pady=(4, 4))
+        view_row = ttk.Frame(primary)
+        view_row.pack(fill="x", pady=(0, 8))
+        for text, value in (("双画面", "both"), ("热像", "thermal"), ("白光", "rgb")):
+            ttk.Radiobutton(
+                view_row, text=text, value=value, variable=self.view_var,
+                command=self._render_preview).pack(side="left", padx=(0, 6))
+        if self.camera is None and self._camera_error:
+            ttk.Label(primary, text="白光摄像头不可用，热像仍可用",
+                      style="Capture.Muted.TLabel", wraplength=225).pack(anchor="w")
 
         source = _section(content, "数据源")
         ttk.Label(source, text="串口（/dev/serial/by-id/...）",
@@ -3577,9 +3598,65 @@ class ThermalApp(object):
             name, len(samples), centre, self.floor_table_var.get()))
 
     # -- 显示/保存 -----------------------------------------------------
+    @staticmethod
+    def _to_pil(bgr):
+        return Image.fromarray(bgr[:, :, ::-1])
+
+    def _render_preview(self) -> None:
+        if self._closed:
+            return
+        thermal = self._thermal_bgr
+        rgb = self._rgb_bgr
+        mode = self.view_var.get()
+        if mode == "rgb" and rgb is None:
+            mode = "thermal"
+        if mode == "thermal" and thermal is None:
+            mode = "rgb"
+        if mode == "both" and (thermal is None or rgb is None):
+            mode = "thermal" if thermal is not None else "rgb"
+
+        if mode == "both" and thermal is not None and rgb is not None:
+            height = 360
+            t = self._to_pil(thermal)
+            r = self._to_pil(rgb)
+            t = t.resize((max(1, round(t.width * height / t.height)), height),
+                         Image.LANCZOS)
+            r = r.resize((max(1, round(r.width * height / r.height)), height),
+                         Image.LANCZOS)
+            gap = 8
+            canvas = Image.new("RGB", (t.width + r.width + gap, height + 26),
+                               (20, 20, 20))
+            canvas.paste(t, (0, 26))
+            canvas.paste(r, (t.width + gap, 26))
+            try:
+                font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
+            except Exception:
+                font = ImageFont.load_default()
+            draw = ImageDraw.Draw(canvas)
+            draw.text((4, 3), "IR", font=font, fill=(255, 255, 255))
+            draw.text((t.width + gap + 4, 3), "RGB", font=font,
+                      fill=(255, 255, 255))
+            image = canvas
+        elif mode == "rgb" and rgb is not None:
+            image = self._to_pil(rgb)
+        elif thermal is not None:
+            image = self._to_pil(thermal)
+        elif rgb is not None:
+            image = self._to_pil(rgb)
+        else:
+            self.preview.configure(image="", text="等待画面…")
+            return
+        try:
+            photo = self.preview.fit_image(image)
+            self.preview.configure(image=photo, text="")
+        except Exception as error:
+            self._set_status("显示画面失败：{}".format(error), error=True)
+
     def _tick(self) -> None:
         if self._closed:
             return
+        changed = False
         session = self.session
         if session is not None:
             try:
@@ -3588,12 +3665,8 @@ class ThermalApp(object):
                 frame = None
             if frame is not None and frame is not self._shown:
                 self._shown = frame
-                try:
-                    rgb = frame.bgr[:, :, ::-1]
-                    photo = self.preview.fit_image(Image.fromarray(rgb))
-                    self.preview.configure(image=photo, text="")
-                except Exception as error:
-                    self._set_status("显示热像失败：{}".format(error), error=True)
+                self._thermal_bgr = frame.bgr
+                changed = True
                 try:
                     summary = frame.summary()
                     self.peak_var.set("{:.2f} ℃".format(summary["peak_c"]))
@@ -3607,6 +3680,29 @@ class ThermalApp(object):
             if error is not None and str(error) != self._last_error:
                 self._last_error = str(error)
                 self._set_status("热像异常：{}".format(error), error=True)
+
+        if self.camera is not None:
+            try:
+                frame = self.camera.read()
+            except Exception:
+                frame = None
+            if frame is not None:
+                self._rgb_bgr = frame
+                self._rgb_failures = 0
+                changed = True
+            else:
+                self._rgb_failures += 1
+                if self._rgb_failures == 12:
+                    try:
+                        self.camera.release()
+                    except Exception:
+                        pass
+                    self.camera = None
+                    self._last_camera_error = "白光摄像头没有画面（已停止读取）"
+                    self._set_status(self._last_camera_error, error=True)
+
+        if changed:
+            self._render_preview()
         try:
             self._after_id = self.root.after(50, self._tick)
         except tk.TclError:
@@ -3636,6 +3732,12 @@ class ThermalApp(object):
                 pass
             self._after_id = None
         self._stop_session()
+        if self.camera is not None:
+            try:
+                self.camera.release()
+            except Exception:
+                pass
+            self.camera = None
         self.root.destroy()
 
 
@@ -3995,13 +4097,32 @@ def run_gui_thermal(args, output_root: Path, root) -> int:
         root.destroy()
         return 1
 
+    camera = None
+    camera_error = ""
+    try:
+        camera = Camera(
+            parse_camera_source(args.device),
+            width=args.width, height=args.height, fps=args.fps,
+            mirror=args.mirror, sharpness=args.sharpness,
+            pixel_format=args.pixel_format)
+        camera.open()
+    except CameraError as error:
+        camera_error = "白光摄像头不可用：{}".format(str(error).splitlines()[0])
+        if camera is not None:
+            try:
+                camera.release()
+            except Exception:
+                pass
+        camera = None
+
     try:
         app = ThermalApp(
             root, session, output_root, source_label=source or "未连接",
             port=(args.thermal_port or "/dev/thermal"), capture=capture,
             scale=args.thermal_scale, delta=args.thermal_delta,
             replay_rate=args.thermal_replay_rate,
-            floor_table_text=args.thermal_floor_table)
+            floor_table_text=args.thermal_floor_table,
+            camera=camera, camera_error=camera_error)
         root.deiconify()
         root.lift()
         app.preview.focus_set()
@@ -4014,6 +4135,11 @@ def run_gui_thermal(args, output_root: Path, root) -> int:
                 session.stop()
         except Exception:
             pass
+        if camera is not None:
+            try:
+                camera.release()
+            except Exception:
+                pass
     return 0
 
 
