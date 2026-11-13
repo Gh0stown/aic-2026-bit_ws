@@ -3360,6 +3360,7 @@ class ThermalApp(object):
         self.floor_table_var = tk.StringVar(value=table_text)
         self.delta_var = tk.StringVar(value="{:.1f}".format(self._delta))
         self.view_var = tk.StringVar(value="both")
+        self.save_dual_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(
             value="等待热像帧…" if session is not None else "未连接")
 
@@ -3381,6 +3382,8 @@ class ThermalApp(object):
         ttk.Label(primary, textvariable=self.source_var, font=self._bold_font,
                   wraplength=230, justify="left").pack(anchor="w", pady=(0, 8))
         _action(primary, "保存快照 (S)", self.save_snapshot, primary=True)
+        ttk.Checkbutton(primary, text="同时保存 IR+RGB 拼图",
+                        variable=self.save_dual_var).pack(anchor="w", pady=(0, 8))
         ttk.Label(primary, text="预览画面", style="Capture.Section.TLabel").pack(
             anchor="w", pady=(4, 4))
         view_row = ttk.Frame(primary)
@@ -3602,6 +3605,31 @@ class ThermalApp(object):
     def _to_pil(bgr):
         return Image.fromarray(bgr[:, :, ::-1])
 
+    def _compose_dual(self, thermal_bgr, rgb_bgr, height=360):
+        """把热像和 RGB 缩到同高并排，返回 PIL Image。"""
+        t = self._to_pil(thermal_bgr)
+        r = self._to_pil(rgb_bgr)
+        t = t.resize((max(1, round(t.width * height / t.height)), height),
+                     Image.LANCZOS)
+        r = r.resize((max(1, round(r.width * height / r.height)), height),
+                     Image.LANCZOS)
+        gap = 8
+        canvas = Image.new("RGB", (t.width + r.width + gap, height + 26),
+                           (20, 20, 20))
+        canvas.paste(t, (0, 26))
+        canvas.paste(r, (t.width + gap, 26))
+        try:
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                max(12, int(height / 22)))
+        except Exception:
+            font = ImageFont.load_default()
+        draw = ImageDraw.Draw(canvas)
+        draw.text((4, 3), "IR", font=font, fill=(255, 255, 255))
+        draw.text((t.width + gap + 4, 3), "RGB", font=font,
+                  fill=(255, 255, 255))
+        return canvas
+
     def _render_preview(self) -> None:
         if self._closed:
             return
@@ -3616,28 +3644,7 @@ class ThermalApp(object):
             mode = "thermal" if thermal is not None else "rgb"
 
         if mode == "both" and thermal is not None and rgb is not None:
-            height = 360
-            t = self._to_pil(thermal)
-            r = self._to_pil(rgb)
-            t = t.resize((max(1, round(t.width * height / t.height)), height),
-                         Image.LANCZOS)
-            r = r.resize((max(1, round(r.width * height / r.height)), height),
-                         Image.LANCZOS)
-            gap = 8
-            canvas = Image.new("RGB", (t.width + r.width + gap, height + 26),
-                               (20, 20, 20))
-            canvas.paste(t, (0, 26))
-            canvas.paste(r, (t.width + gap, 26))
-            try:
-                font = ImageFont.truetype(
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
-            except Exception:
-                font = ImageFont.load_default()
-            draw = ImageDraw.Draw(canvas)
-            draw.text((4, 3), "IR", font=font, fill=(255, 255, 255))
-            draw.text((t.width + gap + 4, 3), "RGB", font=font,
-                      fill=(255, 255, 255))
-            image = canvas
+            image = self._compose_dual(thermal, rgb, height=360)
         elif mode == "rgb" and rgb is not None:
             image = self._to_pil(rgb)
         elif thermal is not None:
@@ -3712,14 +3719,41 @@ class ThermalApp(object):
         if self.session is None:
             self._set_status("尚未连接热像", error=True)
             return
+        frame = self.session.latest()
+        if frame is None:
+            self._set_status("还没有热像帧，不能保存", error=True)
+            return
+        # 需要拼图时用当前 RGB（读不到就退回上一帧）
+        if self.camera is not None:
+            try:
+                current = self.camera.read()
+                if current is not None:
+                    self._rgb_bgr = current
+            except Exception:
+                pass
         try:
             png, meta = self.session.save_snapshot(
                 directory=str(self.thermal_dir), prefix="thermal", temps=False)
         except Exception as error:
             self._set_status("保存热像快照失败：{}".format(error), error=True)
             return
-        self._set_status("已保存：{}（{}）".format(
-            display_path(png), Path(meta).name))
+        dual_path = None
+        if self.save_dual_var.get() and self._rgb_bgr is not None:
+            try:
+                image = self._compose_dual(frame.bgr, self._rgb_bgr, height=720)
+                dual_path = png.with_name(png.stem + "_rgb.png")
+                image.save(str(dual_path))
+            except Exception as error:
+                self._set_status(
+                    "热像已保存，但拼图失败：{}".format(error), error=True)
+                return
+        message = "已保存：{}（{}）".format(display_path(png), Path(meta).name)
+        if self.save_dual_var.get():
+            if dual_path is not None:
+                message += " + 拼图 {}".format(display_path(dual_path))
+            else:
+                message += "；RGB 不可用，未生成拼图"
+        self._set_status(message, error=bool(self.save_dual_var.get() and dual_path is None))
 
     def close(self) -> None:
         if self._closed:

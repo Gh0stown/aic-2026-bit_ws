@@ -401,6 +401,7 @@ RGB 用普通摄像头参数（`--device`，默认 1280×720）；白光打不�
 | --- | --- |
 | 「双画面 / 热像 / 白光」 | 切换预览；默认双画面 |
 | 点「保存快照」 / `S` | 保存热像 PNG + 同名 JSON |
+| 勾选「同时保存 IR+RGB 拼图」 | 快照时额外保存一张 `thermal_..._rgb.png`（默认关） |
 | 「连接串口」 | 用输入框里的 `/dev/serial/by-id/...` 重建 session |
 | 「回放抓包…」 | 选择 `capture.bin` 做无硬件回放 |
 | 「应用楼层表」 | 写入 `4F:0-5,3F:6-11,2F:12-17,1F:18-23` 这类映射 |
@@ -413,6 +414,7 @@ RGB 用普通摄像头参数（`--device`，默认 1280×720）；白光打不�
 ```
 ~/Pictures/photo_capture/红外热像/thermal_YYYYmmdd_HHMMSS_mmm.png
 ~/Pictures/photo_capture/红外热像/thermal_YYYYmmdd_HHMMSS_mmm.json
+~/Pictures/photo_capture/红外热像/thermal_YYYYmmdd_HHMMSS_mmm_rgb.png  # 勾选拼图时
 ```
 
 热像装反时楼层表要整体倒过来：`row=0` 是图像顶部。判层用峰值行，不要用热点框中心。
