@@ -69,6 +69,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 import thermal_calibration as calibration_math
+import building_windows
 
 try:  # YOLO 检测模块；缺失时只影响模型测试模式
     import yolo_detect
@@ -3743,6 +3744,242 @@ class CalibrationWindow(object):
         self.root.destroy()
 
 
+class WindowCentersWindow(object):
+    """Annotate four RGB window centres on one frozen, model-matched building."""
+
+    def __init__(self, app):
+        self.app = app
+        self.root = tk.Toplevel(app.root)
+        self.root.title("四层中央窗户中心模板")
+        self.root.geometry("{}x{}".format(min(1080, self.root.winfo_screenwidth() - 60),
+                                         min(800, self.root.winfo_screenheight() - 80)))
+        self.root.minsize(740, 600)
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.bind("<Escape>", lambda event: self.close())
+        self._closed = False
+        self._after_id = None
+        self._request_id = None
+        self._deadline = 0
+        self._snapshot = None
+        self._corners = None
+        self._context = None
+        self.centers = {}
+        self.floor_var = tk.StringVar(master=self.root, value="1F")
+        self.status_var = tk.StringVar(master=self.root,
+            value="先冻结 RGB 并识别四角，再按 1F→4F 点击每层中间窗中心；不需要加热，不修改已有 H。")
+        self.info_var = tk.StringVar(master=self.root, value="尚未冻结")
+        self._build_ui()
+
+    def _build_ui(self):
+        body = ttk.Frame(self.root, padding=10)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(1, weight=1)
+        ttk.Label(body, text="四角顺序：左上 / 右上 / 右下 / 左下。请核对绿色四边形确实是楼宇正面。",
+                  wraplength=950).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        panel = ttk.Frame(body, width=700, height=350)
+        panel.grid(row=1, column=0, sticky="nsew")
+        panel.grid_propagate(False)
+        self.preview = _CapturePreview(panel)
+        self.preview.pack(fill="both", expand=True)
+        self.preview.configure(text="点击下方按钮，冻结当前 RGB 并识别楼宇四角")
+        self.preview.bind("<Button-1>", self._click)
+        ttk.Label(body, textvariable=self.info_var).grid(row=2, column=0, sticky="w", pady=4)
+        floor_row = ttk.Frame(body)
+        floor_row.grid(row=3, column=0, sticky="ew")
+        ttk.Label(floor_row, text="当前标注：").pack(side="left")
+        for floor in ("1F", "2F", "3F", "4F"):
+            ttk.Radiobutton(floor_row, text=floor, variable=self.floor_var, value=floor).pack(side="left", padx=8)
+        self.table = ttk.Treeview(body, columns=("floor", "pixel", "plane"), show="headings", height=4)
+        for key, label in (("floor", "楼层"), ("pixel", "RGB (u, v)"), ("plane", "楼面相对坐标 (s, t)")):
+            self.table.heading(key, text=label)
+            self.table.column(key, anchor="center", width=180)
+        self.table.grid(row=4, column=0, sticky="ew", pady=6)
+        self.table.bind("<<TreeviewSelect>>", self._select_floor)
+        actions = ttk.Frame(body)
+        actions.grid(row=5, column=0, sticky="ew")
+        self.buttons = {}
+        for index, (text, callback) in enumerate((
+                ("冻结 RGB / 识别四角", self.freeze_and_detect), ("清空标注", self.clear),
+                ("保存四窗模板", self.save), ("加载模板", self.load), ("关闭", self.close))):
+            button = ttk.Button(actions, text=text, command=callback)
+            button.grid(row=0, column=index, sticky="ew", padx=2)
+            actions.columnconfigure(index, weight=1)
+            self.buttons[text] = button
+        label = ttk.Label(body, textvariable=self.status_var, wraplength=950, justify="left")
+        label.grid(row=6, column=0, sticky="ew", pady=5)
+        body.bind("<Configure>", lambda event: label.configure(wraplength=max(300, event.width - 30)))
+        self._refresh()
+
+    def _current_context(self):
+        rgb = self.app._rgb_bgr
+        if rgb is None:
+            raise ValueError("白光画面不可用，请先连接 RGB 摄像头")
+        return (rgb.shape[1], rgb.shape[0]), self.app._rgb_mirror()
+
+    def freeze_and_detect(self):
+        try:
+            context = self._current_context()
+            detector = self.app._ensure_building_detector()
+            self._snapshot = self.app._rgb_bgr.copy()
+            self._context = context
+            self._corners = None
+            self.centers.clear()
+            self.floor_var.set("1F")
+            self._request_id = self.app._submit_building(self._snapshot)
+            self._deadline = time.monotonic() + 10.0
+            self.status_var.set("已冻结 RGB，正在识别四角；此前未保存的点已清空…")
+            self.buttons["冻结 RGB / 识别四角"].configure(state="disabled")
+            self._refresh()
+            self._poll()
+        except Exception as error:
+            self._request_id = None
+            self.status_var.set("识别失败：{}".format(error))
+            self.buttons["冻结 RGB / 识别四角"].configure(state="normal")
+
+    def _poll(self):
+        self._after_id = None
+        if self._closed or self._request_id is None:
+            return
+        detector = self.app._building_detector
+        result = detector.latest() if detector is not None else None
+        if result is not None and result[0] == self._request_id:
+            self._request_id = None
+            self.buttons["冻结 RGB / 识别四角"].configure(state="normal")
+            detections = result[1]
+            if len(detections) != 1:
+                self.status_var.set("需要恰好一个四角可靠的楼宇，当前检测 {} 个；调整视野后重新冻结".format(len(detections)))
+            else:
+                try:
+                    if self._current_context() != self._context:
+                        raise ValueError("RGB 尺寸或镜像改变，请重新冻结")
+                    self._corners = np.asarray(detections[0].corners, dtype=float).copy()
+                    width, height = self._context[0]
+                    if not ((self._corners >= 0).all() and
+                            (self._corners <= (width - 1, height - 1)).all()):
+                        self._corners = None
+                        raise ValueError("楼宇四角未全部位于画面内，请调整视野后重新冻结")
+                    template = self.app._window_template
+                    if template is not None and template.rgb_size == self._context[0] and template.rgb_mirror == self._context[1]:
+                        self.centers = building_windows.template_centers(template, self._corners)
+                    self.status_var.set("四角已识别，请核对轮廓；依次点击 1F～4F 中间窗，已存模板会显示供修改。")
+                    self._refresh()
+                except ValueError as error:
+                    self.status_var.set("无法标注：{}".format(error))
+            return
+        error = getattr(detector, "last_error", "") if detector is not None else "模型已停止"
+        if error or time.monotonic() > self._deadline:
+            self._request_id = None
+            self.buttons["冻结 RGB / 识别四角"].configure(state="normal")
+            self.status_var.set("识别失败：{}".format(error or "等待模型结果超时，请重试"))
+            return
+        self._after_id = self.root.after(80, self._poll)
+
+    def _click(self, event):
+        if self._snapshot is None or self._corners is None:
+            self.status_var.set("请先冻结 RGB 并识别四角")
+            return
+        point = calibration_preview_point(self.preview, event.x, event.y)
+        if point is None:
+            return
+        try:
+            if self._context != self._current_context():
+                raise ValueError("RGB 尺寸或镜像已改变，请重新冻结")
+            u, v = float(int(point[0])), float(int(point[1]))
+            s, t = building_windows.to_plane(self._corners, u, v)
+            if not (0 <= s <= 1 and 0 <= t <= 1):
+                raise ValueError("请选择绿色楼宇正面内部的窗户中心")
+            floor = self.floor_var.get()
+            self.centers[floor] = (u, v)
+            floors = ("1F", "2F", "3F", "4F")
+            remaining = [value for value in floors if value not in self.centers]
+            if remaining:
+                self.floor_var.set(remaining[0])
+            self.status_var.set("已记录 {}；{}".format(floor,
+                "继续点下一层中间窗" if remaining else "四点齐全，请核对顺序后保存（1F 最下、4F 最上）"))
+            self._refresh()
+        except ValueError as error:
+            self.status_var.set(str(error))
+
+    def _select_floor(self, _event=None):
+        selected = self.table.selection()
+        if selected:
+            self.floor_var.set(selected[0])
+
+    def _refresh(self):
+        self.table.delete(*self.table.get_children())
+        for floor in ("1F", "2F", "3F", "4F"):
+            point = self.centers.get(floor)
+            normalized = building_windows.to_plane(self._corners, *point) if point is not None and self._corners is not None else None
+            self.table.insert("", "end", iid=floor, values=(floor,
+                "--" if point is None else "{:.1f}, {:.1f}".format(*point),
+                "--" if normalized is None else "{:.4f}, {:.4f}".format(*normalized)))
+        self.buttons["保存四窗模板"].configure(state="normal" if len(self.centers) == 4 else "disabled")
+        if self._snapshot is None:
+            return
+        image = self._snapshot.copy()
+        if self._corners is not None:
+            corners = np.rint(self._corners).astype(np.int32)
+            cv2.polylines(image, [corners], True, (0, 255, 0), 2)
+            for name, point in zip(("TL", "TR", "BR", "BL"), corners):
+                cv2.putText(image, name, tuple(point), cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 255, 0), 1)
+            for floor, point in self.centers.items():
+                uv = tuple(round(value) for value in point)
+                cv2.circle(image, uv, 6, (0, 255, 255), 2)
+                cv2.putText(image, floor, (uv[0] + 8, uv[1]), cv2.FONT_HERSHEY_SIMPLEX, .6, (0, 255, 255), 2)
+        self.info_var.set("已冻结 RGB {}×{}；已标 {} / 4 个中央窗".format(
+            image.shape[1], image.shape[0], len(self.centers)))
+        photo = self.preview.fit_image(self.app._to_pil(image))
+        self.preview.configure(image=photo, text="")
+
+    def clear(self):
+        self.centers.clear()
+        self.floor_var.set("1F")
+        self.status_var.set("当前四窗标注已清空，原来保存的模板文件未删除")
+        self._refresh()
+
+    def save(self):
+        try:
+            if self._snapshot is None or self._corners is None:
+                raise ValueError("请先冻结并识别四角")
+            if self._context != self._current_context():
+                raise ValueError("RGB 尺寸或镜像已改变，请重新冻结")
+            template = building_windows.make_template(self._corners, self.centers,
+                self._context[0], rgb_mirror=self._context[1], model_path=str(self.app._building_model_path))
+            self.app.window_template_path.parent.mkdir(parents=True, exist_ok=True)
+            building_windows.save_template(self.app.window_template_path, template)
+            self.app._window_template = template
+            self.app.window_match_var.set("四窗模板已保存；关闭标注窗后开始实时匹配（仅几何候选）")
+            self.status_var.set("已保存 {}；已有 IR→RGB H 完全未改动".format(display_path(self.app.window_template_path)))
+        except (ValueError, OSError) as error:
+            self.status_var.set("保存失败：{}".format(error))
+
+    def load(self):
+        try:
+            context = self._current_context()
+            template = building_windows.load_template(self.app.window_template_path,
+                context[0], rgb_mirror=context[1], model_path=str(self.app._building_model_path))
+            self.app._window_template = template
+            self.app.window_match_var.set("四窗模板已加载；点击启用窗户匹配或冻结识别")
+            if self._corners is not None and self._context == context:
+                self.centers = building_windows.template_centers(template, self._corners)
+                self._refresh()
+            self.status_var.set("模板已加载。冻结/识别后可显示和修改已存四点；原 H 不变。")
+        except (ValueError, OSError) as error:
+            self.status_var.set("加载失败，未使用该文件：{}".format(error))
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        if self._after_id is not None:
+            self.root.after_cancel(self._after_id)
+            self._after_id = None
+        if self.app.window_centers_window is self:
+            self.app.window_centers_window = None
+        self.root.destroy()
+
+
 class ThermalApp(object):
     """红外热像窗口：MLX90640 热图、楼层标定、热点读数和快照。"""
 
@@ -3758,6 +3995,18 @@ class ThermalApp(object):
         self.thermal_dir = self.output_root / "红外热像"
         self.calibration_path = self.thermal_dir / "calibration.json"
         self.calibration_window = None
+        self.window_centers_window = None
+        self.window_template_path = self.thermal_dir / "window_centers.json"
+        self._window_template = None
+        self._window_template_checked = False
+        self._building_model_path = DEFAULT_MODEL_DIR / "building_d.pt"
+        self._building_detector = None
+        self._building_seq = 0
+        self._building_submissions = {}
+        self._building_seen_id = None
+        self._building_last_submit = 0.0
+        self._building_pose = None
+        self.window_match_var = tk.StringVar(master=root, value="中央窗匹配：未启用（仅几何候选）")
         self._calibration = None
         self._calibration_checked = False
         self._source_generation = 0
@@ -3824,6 +4073,10 @@ class ThermalApp(object):
                   wraplength=230, justify="left").pack(anchor="w", pady=(0, 8))
         _action(primary, "保存快照 (S)", self.save_snapshot, primary=True)
         _action(primary, "标定 IR → RGB…", self.open_calibration)
+        _action(primary, "标注四层中间窗…", self.open_window_centers)
+        _action(primary, "启用窗户匹配", self.enable_window_matching)
+        ttk.Label(primary, textvariable=self.window_match_var, wraplength=230,
+                  style="Capture.Muted.TLabel").pack(anchor="w", pady=(0, 6))
         ttk.Label(primary, textvariable=self.calibration_var, wraplength=230,
                   style="Capture.Muted.TLabel").pack(anchor="w", pady=(0, 6))
         ttk.Checkbutton(primary, text="同时保存 IR+RGB 拼图",
@@ -3854,7 +4107,7 @@ class ThermalApp(object):
         reading = _section(content, "当前读数")
         for label, var in (("峰值温度", self.peak_var),
                            ("峰值位置", self.row_var),
-                           ("楼层", self.floor_now_var),
+                           ("IR 行号楼层", self.floor_now_var),
                            ("环境温度", self.ambient_var)):
             row = ttk.Frame(reading)
             row.pack(fill="x", pady=1)
@@ -3923,6 +4176,139 @@ class ThermalApp(object):
             return
         self.calibration_window = CalibrationWindow(self)
 
+    # -- 四个中央窗模板：独立于 IR→RGB H -------------------------------
+    def open_window_centers(self):
+        if self.window_centers_window is not None and not self.window_centers_window._closed:
+            self.window_centers_window.root.lift()
+            return
+        self.window_centers_window = WindowCentersWindow(self)
+
+    def _rgb_mirror(self):
+        return bool(getattr(self.camera, "mirror", False))
+
+    def _ensure_building_detector(self):
+        if self._building_detector is None:
+            if not self._building_model_path.is_file():
+                raise ValueError("找不到楼宇四角模型：{}".format(self._building_model_path))
+            self.window_match_var.set("正在加载楼宇四角模型…")
+            self.root.update_idletasks()
+            self._building_detector = building_windows.BuildingPoseDetector(str(self._building_model_path))
+        return self._building_detector
+
+    def enable_window_matching(self):
+        try:
+            self._ensure_building_detector()
+            self.window_match_var.set("四角识别已启用；{}".format(
+                "等待实时楼宇" if self._window_template is not None else "请先标注并保存四个中间窗中心"))
+        except Exception as error:
+            self._building_pose = None
+            self.window_match_var.set("启用失败：{}".format(error))
+
+    def _submit_building(self, rgb):
+        detector = self._ensure_building_detector()
+        self._building_seq += 1
+        seq = self._building_seq
+        self._building_submissions[seq] = (time.monotonic(), (rgb.shape[1], rgb.shape[0]), self._rgb_mirror())
+        while len(self._building_submissions) > 12:
+            del self._building_submissions[min(self._building_submissions)]
+        detector.submit(rgb.copy(), seq)
+        self._building_last_submit = time.monotonic()
+        return seq
+
+    def _current_building_pose(self, rgb):
+        pose = getattr(self, "_building_pose", None)
+        if pose is None or rgb is None:
+            return None
+        if (time.monotonic() - pose["time"] > 1.2 or pose["size"] != (rgb.shape[1], rgb.shape[0])
+                or pose["mirror"] != self._rgb_mirror()):
+            return None
+        return pose["detection"]
+
+    def _update_building_tracking(self):
+        rgb = self._rgb_bgr
+        if rgb is not None and not self._window_template_checked:
+            self._window_template_checked = True
+            if self.window_template_path.exists():
+                try:
+                    self._window_template = building_windows.load_template(self.window_template_path,
+                        (rgb.shape[1], rgb.shape[0]), rgb_mirror=self._rgb_mirror(),
+                        model_path=str(self._building_model_path))
+                    self.window_match_var.set("四窗模板已加载；点击启用窗户匹配")
+                except (ValueError, OSError) as error:
+                    self.window_match_var.set("窗户模板未加载：{}".format(error))
+        template = self._window_template
+        if template is not None and rgb is not None and (template.rgb_size != (rgb.shape[1], rgb.shape[0])
+                or template.rgb_mirror != self._rgb_mirror()):
+            self._window_template = None
+            self._building_pose = None
+            self.window_match_var.set("RGB 尺寸或镜像改变，四窗模板已停用，请重新加载 / 标注")
+        detector = self._building_detector
+        if detector is None:
+            return
+        result = detector.latest()
+        if result is not None and result[0] != self._building_seen_id:
+            self._building_seen_id = result[0]
+            metadata = self._building_submissions.get(result[0])
+            self._building_pose = None
+            if metadata is not None and len(result[1]) == 1:
+                corners = np.asarray(result[1][0].corners)
+                if ((corners >= 0).all() and (corners <= np.array(metadata[1]) - 1).all()):
+                    self._building_pose = dict(time=metadata[0], size=metadata[1], mirror=metadata[2],
+                                               detection=result[1][0])
+                else:
+                    self.window_match_var.set("楼宇四角未全部位于画面内，暂停窗户匹配")
+            elif len(result[1]) != 1:
+                self.window_match_var.set("楼宇缺失 / 角点不可靠 / 多楼宇，暂停窗户匹配")
+        error = getattr(detector, "last_error", "")
+        if error:
+            self._building_pose = None
+            self.window_match_var.set("楼宇识别错误：{}".format(error))
+        # The editor's frozen request must not be displaced by live submissions.
+        if rgb is not None and self.window_centers_window is None and time.monotonic() - self._building_last_submit >= .3:
+            self._submit_building(rgb)
+        if not error:
+            self._update_window_candidate()
+
+    def _update_window_candidate(self):
+        if not hasattr(self, "window_match_var") or self._building_detector is None:
+            return
+        template = self._window_template
+        pose = self._current_building_pose(self._rgb_bgr)
+        if template is None:
+            self.window_match_var.set("四角识别已启用；尚未保存四窗模板")
+            return
+        if pose is None:
+            self.window_match_var.set("等待唯一、可靠且未过期的楼宇四角")
+            return
+        if self._shown is None or self._calibration is None:
+            self.window_match_var.set("窗中心已计算；等待有效热像与 IR→RGB H")
+            return
+        try:
+            u, v = calibration_math.project(self._calibration.H, self._shown.hotspot.col, self._shown.hotspot.row)
+            floor = building_windows.match_floor(template, pose.corners, u, v)
+            self.window_match_var.set("RGB 中央窗匹配：{}（几何候选，非高温判定）".format(floor) if floor else
+                "热点不在楼宇 / 距中央窗过远，暂不判层")
+        except ValueError as error:
+            self.window_match_var.set("窗户匹配暂停：{}".format(error))
+
+    def _draw_window_centers(self, rgb):
+        pose = self._current_building_pose(rgb)
+        if pose is None:
+            return rgb
+        image = rgb.copy()
+        cv2.polylines(image, [np.rint(pose.corners).astype(np.int32)], True, (0, 255, 0), 2)
+        template = getattr(self, "_window_template", None)
+        if template is not None:
+            try:
+                for floor, point in building_windows.template_centers(template, pose.corners).items():
+                    uv = tuple(round(value) for value in point)
+                    cv2.circle(image, uv, 5, (255, 180, 0), 2)
+                    cv2.putText(image, floor, (uv[0] + 8, uv[1]), cv2.FONT_HERSHEY_SIMPLEX,
+                                .5, (255, 180, 0), 1, cv2.LINE_AA)
+            except ValueError:
+                pass
+        return image
+
     def _display_limits(self):
         session = self.session
         return (getattr(session, "tmin", 20.0), getattr(session, "tmax", 35.0))
@@ -3968,12 +4354,15 @@ class ThermalApp(object):
     def _project_rgb(self, frame=None, rgb=None):
         rgb = self._rgb_bgr if rgb is None else rgb
         frame = self._shown if frame is None else frame
-        if rgb is None or frame is None or self._calibration is None:
-            return rgb
+        if rgb is None:
+            return None
+        decorated = self._draw_window_centers(rgb)
+        if frame is None or self._calibration is None:
+            return decorated
         calibration = self._calibration
         if calibration.rgb_size != (rgb.shape[1], rgb.shape[0]):
-            return rgb
-        image = rgb.copy()
+            return decorated
+        image = decorated.copy()
         try:
             u, v = calibration_math.project(calibration.H, frame.hotspot.col, frame.hotspot.row)
             if 0 <= u < rgb.shape[1] and 0 <= v < rgb.shape[0]:
@@ -4288,6 +4677,12 @@ class ThermalApp(object):
 
         if changed:
             self._check_calibration()
+        try:
+            self._update_building_tracking()
+        except Exception as error:
+            self._building_pose = None
+            self.window_match_var.set("窗户匹配暂停：{}".format(error))
+        if changed:
             self._render_preview()
         if self.calibration_window is not None:
             self.calibration_window.update_live(self._shown, self._rgb_bgr, self._source_generation)
@@ -4348,6 +4743,11 @@ class ThermalApp(object):
             self._after_id = None
         if self.calibration_window is not None:
             self.calibration_window.close()
+        if self.window_centers_window is not None:
+            self.window_centers_window.close()
+        if self._building_detector is not None:
+            self._building_detector.close()
+            self._building_detector = None
         self._stop_session()
         if self.camera is not None:
             try:

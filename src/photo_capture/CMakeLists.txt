@@ -18,5 +18,6 @@ install(FILES
   scripts/chassis.py
   scripts/gauge.py
   scripts/thermal_calibration.py
+  scripts/building_windows.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
