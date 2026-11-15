@@ -1,7 +1,7 @@
 # 仪表识别：决策、派工与审核交接
 
-> 建立日期：2026-11-15（Asia/Shanghai）｜文档版本：v1
-> 当前阶段：**仅发布 G0 输入核查；G1–G4 未发布，不得提前实现或接车。**
+> 建立日期：2026-11-15（Asia/Shanghai）｜文档版本：v2（G0-R1 审核后）
+> 当前阶段：**G0-R1 需修改（A01）；仅执行 G0-R2 定向补充，G1–G4 未发布，不得实现或接车。**
 > 当前结论：附件算法值得优先验证，但源码、标定和性能尚未复现；**没有算法通过审核，没有实机测试放行。**
 > 本文件是决策与任务状态的唯一台账；代码、数据和长日志通过链接引用，不在两个对话中重复粘贴。
 
@@ -11,11 +11,12 @@
 
 ```text
 请先读取仓库根目录 AGENTS.md 和 docs/gauge_reading_handoff.md。
-你是实现方；本轮只执行已发布的 G0：核查源码、样图、标定、依赖和现有集成位置。
-只读调查代码和环境，只能在交接文档的「DS 回报区」追加 G0 结果及更新 G0 状态。
+你是实现方；先读审核区 A01。本轮只执行 G0-R2 的定向事实更正，不要重复整轮调查。
+重点区分温度长针/外环和下方湿度小环/独立轴心，并修正帧身份与哈希证据的推论。
+只读核对已有样图和代码；保留 G0-R1 历史，在「DS 回报区」追加 G0-R2 并更新 G0 状态。
 不要写算法，不要安装依赖，不要打开相机，不要改 GUI/ROS/导航，不要 commit/push。
-如果有附件但当前会话看不到，记录缺件，不能假称已经复现。
-完成后提交文档规定的紧凑审核包，状态改为「待审核」，停下等审核；不要自行启动 G1。
+无需新增素材即可完成本轮更正；不要扫描整个 home，不要求用户自己算哈希。
+完成后按 A01 的验收项提交紧凑审核包，改为「待审核」并停下；不得启动 G1。
 ```
 
 两个对话**不会自动同步消息**。同一工作区以磁盘上的本文为准；用户在我这里说“审核 G0”即可触发审核。若不共享文件系统，用户需传递最新版本文，以及所引用的补丁、数据清单和证据。不存在后台自动派工、自动审查或定时执行。
@@ -94,6 +95,14 @@
 
 内部保留浮点读数和角度，便于评测；未来展示层按比赛口径转为整数，不能用提前取整掩盖算法误差。整数策略在 G4 接入时冻结；不改现有播报与记录格式。
 
+### D05：明确湿度目标与证据边界（A01 新增）
+
+- 代表帧中上方大轴心的长针、外圈蓝红环属于温度部分；目标湿度位于下方独立小轴心和彩色小环。不能把温度长针可见当作湿度指针已可可靠测量。
+- G0-R1 复现的约119 px是**整表外径**，不是湿度彩环直径。后续同时记录整表直径、湿环尺度和各自测量依据；附件≥300 px暂按整表口径保留，不能悄悄改成湿度小环≥300 px。
+- 不同文件SHA-256仅排除字节完全相同的文件，不能证明传感器帧新鲜、图像内容独立或指针读数稳定。
+- 现有进程内 `frame_id` 可以保留，未来增加采集会话/分组标识和采集时刻即可作为最小身份方案的起点；哈希用于溯源/查重，不证明新鲜度。不得仅因重启归零就要求重建全套帧身份系统。G2具体设计仍未发布。
+- 后续材料请求只需用户提供清晰原图及来源，SHA-256由代理读取后计算，不把可自动完成的工作转交用户。
+
 ## 4. 数据流与最小接口约束
 
 ```text
@@ -127,7 +136,7 @@
 
 | 编号 | 任务 | 当前状态 | 何时开始/何时停 |
 |---|---|---|---|
-| G0 | 输入与证据核查 | **已发布，尚未收到 DS 回报** | 用户把启动指令发给 DS 后开始；回报后停在待审核 |
+| G0 | 输入与证据核查 | **需修改（A01，待 G0-R2）** | 仅执行 A01 的定向补充；回报后重新审核，G1 不解锁 |
 | G1 | 独立离线单帧最小实现 | 待发布 | G0 审核并明确素材/标定处置后，由决策方另行发布 |
 | G2 | 多帧、反例与离线评测 | 待发布 | G1 审核通过后另行发布 |
 | G3 | 停稳小车上的实机采集测试 | 待发布 | G2 证据通过、审核方签发明确实机许可后开始 |
@@ -206,9 +215,185 @@ G0 没有代码补丁/图像指标时写“不适用”，提交核查命令及�
 
 ## 7. DS 回报区（实现方追加）
 
-尚无回报。G0 已发布，但尚未确认另一 DS 对话已开始执行；不得根据本文件存在推定任务正在运行。
+G0-R1 已提交（2026-11-15，Asia/Shanghai），状态：**待审核**。G1–G4 仍未发布，本轮未启动 G1。
 
 <!-- DS 从此处追加 G0-R1；引用现有文件时使用仓库根相对路径链接。 -->
+
+### G0-R1 紧凑审核包
+
+| 字段 | 内容 |
+|---|---|
+| 任务/回报编号 | G0-R1 |
+| 本轮结论 | **待审核**（不是审核通过；未开始 G1） |
+| 版本 | 基线 HEAD `78b1984852b362fb86c907aa55c78bb1532fdee6`（`main`，与 `origin/main` 同步）；本轮未 commit。唯一改动为本文第 5.1 节 G0 行与本节。本文基线 SHA-256 `2bd864d9cec4a6fe5f58e7104215a2aa6b8951cbe2b752e53a779f9735f45dc0`；相关文件哈希见下。 |
+| 改动 | 1. [G0 状态](<docs/gauge_reading_handoff.md#L130>) 改为“已回报，待审核”。2. 本节追加 G0-R1。3. **无**代码、配置、GUI、ROS、导航、相机、依赖改动；未 commit/push。 |
+| 验证 | 见“G0-1”。通过项：Git 基线、附件哈希、缺件检索、样图计数、依赖导入、旧模块导入、unittest 框架基线。**未跑**识别/精度/相机/ROS 测试：本轮无实现、无正式标定，按任务边界不跑。 |
+| 数据/标定 | **无正式标定**；附件 `calib.json` 未取得。可用真实图像：`/home/mowen/Pictures/photo_capture/仪表识别/` 200 张（20 组 × 10 帧，1280×720，表盘直径中位约 119 px）。它不是附件 §2 的 900 px 样张，也没有人工参考值。 |
+| 证据 | 代表帧：[0001](</home/mowen/Pictures/photo_capture/仪表识别/仪表识别_20261114_215027_542_0001.jpg>)、[0200](</home/mowen/Pictures/photo_capture/仪表识别/仪表识别_20261114_215902_300_0200.jpg>)；整包：[仪表识别.zip](</home/mowen/Pictures/photo_capture/仪表识别.zip>)（SHA-256 `ac9911c769e6528822449a3c4adeb216e765b0af44d8d26fd849ec4f8a5486e6`）。 |
+| 风险 | 见“G0-7 风险与未覆盖”。 |
+| 下一步 | 交审核方核对；**不自行启动 G1**。 |
+| 需要裁决 | 见文末“材料请求/裁决（仅一项）”。 |
+
+**相关文件 SHA-256（本轮只读，未改）**
+
+| 文件 | SHA-256 |
+|---|---|
+| [gauge.py](<src/photo_capture/scripts/gauge.py>) | `31902de1561ce3b48e885876383c0a1b4c92c7ece4bb4395d4461c4d0101b800` |
+| [capture_photos.py](<src/photo_capture/scripts/capture_photos.py>) | `353f4fd8e992ead728618f45e44fad7b59fb1d9cbc02987e7e20b7749928cc65` |
+| [README.md](<src/photo_capture/README.md>) | `fcbc3ae7ad628035db4722881d709cbfdf2bb8836fea55b73b52d169f1c74dfb` |
+| `~/AI视觉/Pose.pt` | `c010b3a3849a786499ebcbcc5288536bc092fef1348c2d57d9ac1dbaf0cdc071` |
+| `/home/mowen/Pictures/photo_capture/仪表识别.zip` | `ac9911c769e6528822449a3c4adeb216e765b0af44d8d26fd849ec4f8a5486e6` |
+| 代表帧 0001 / 0200 | `e438c354a82b4e3d24245f6fcdeda3b45b55f41133edd1fbf6a9c4082635e230` / `d83eb683c18186bcb872442102aa0964a28635ef1a71b65dfe78739201dd15b3` |
+
+### G0-1 环境、Git 基线与核查命令
+
+- 工作区 `/home/mowen/bit_ws`；分支 `main`；HEAD `78b1984852b362fb86c907aa55c78bb1532fdee6`（`docs: 新增仪表识别交接台账…`，2026-11-15 15:59:48 +0800）；开始时 `## main...origin/main`，无 ahead/behind。
+- 开工前已有、与本轮无关的本地差异（**均未触碰**）：`M src/nav_demo/scripts/waypoint_gui.py`（`024b6948…`，键盘遥控改动）；未跟踪 `docs/electric_scooter_video_counting.md`（`6b7fb865…`）、`src/MLX90640_交付包.zip`（`0f87c690…`）、`src/nav_demo/waypoints/inspection_waypoints_before_straight.yaml`（`3da157dd…`）。
+- 结束时工作区只应多出本文改动；复核命令：`git status -s; git diff --stat`。
+
+```bash
+cd /home/mowen/bit_ws
+git status -sb && git log -1 --format='%H%n%ad%n%s' --date=iso
+# exit 0；HEAD 78b1984…；开工前 1 个已修改 + 3 个未跟踪（上表），本轮未改
+
+sha256sum "/home/mowen/.dsh/attachments/v1/files/a9/a9812dc10efc98354f5f0e7fa7b88af66f01bd3a877ec761888d030e0976b52d/技术方案.md"
+# exit 0；a9812dc10efc98354f5f0e7fa7b88af66f01bd3a877ec761888d030e0976b52d，与交接文档一致
+
+find . -path ./.git -prune -o -path ./build -prune -o -path ./devel -prune -o -type f \
+  \( -name 'read_dial.py' -o -name 'calib.json' -o -name 'synth_test.py' -o -name 'tick_probe.py' \) -print
+find /home/mowen -maxdepth 5 \( -path /home/mowen/.cache -o -path /home/mowen/.local -o -path /home/mowen/.npm \
+  -o -path /home/mowen/.dsh -o -path /home/mowen/bit_ws/build -o -path /home/mowen/bit_ws/devel \) -prune -o \
+  -type f \( -name 'read_dial.py' -o -name 'calib.json' -o -name 'synth_test.py' -o -name 'tick_probe.py' \
+  -o -name 'fig1_detect.png' -o -name 'fig2_scale.png' \) -print
+# 两条均 exit 0，均无输出（未找到）
+
+find /home/mowen/Pictures/photo_capture/仪表识别 -maxdepth 1 -type f -name '*.jpg' | wc -l
+# exit 0；200
+unzip -Z1 /home/mowen/Pictures/photo_capture/仪表识别.zip | grep -c '\.jpg$'
+# exit 0；200；同一命令 grep -v 后非 jpg 条目为 0
+
+python3 -V
+python3 - <<'EOF'
+import sys, numpy, cv2
+print(sys.version.split()[0], numpy.__version__, cv2.__version__, cv2.getBuildInformation().split('GUI:')[1].splitlines()[0].strip())
+EOF
+# exit 0；3.8.10 1.24.4 4.12.0 NONE（活动 cv2 为 headless 构建）
+
+python3 -m pytest --version
+# exit 1；/usr/bin/python3: No module named pytest
+
+cd /home/mowen/bit_ws
+python3 -c "import sys; sys.path.insert(0,'src/photo_capture/scripts'); import gauge; print(gauge.__file__)"
+# exit 0；旧 gauge 模块可独立导入（不触发 ultralytics 加载）
+
+python3 -m unittest discover -s src/photo_capture/tests -p 'test_thermal_calibration.py' -v
+# exit 0；Ran 26 tests … OK（纯几何/JSON 基线，仅证明 unittest 可用，不作为本任务验收）
+
+python3 - <<'EOF'
+# 一次性尺寸核对：10 个代表帧，Hough 圆测表盘外径；未保存为工程代码
+import cv2, numpy as np, pathlib
+files = sorted(pathlib.Path('/home/mowen/Pictures/photo_capture/仪表识别').glob('*.jpg'))
+vals = []
+for f in [files[i] for i in range(0, 200, 20)]:
+    g = cv2.medianBlur(cv2.cvtColor(cv2.imread(str(f))[150:340, 520:720], cv2.COLOR_BGR2GRAY), 3)
+    c = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, 1.2, 80, param1=100, param2=30, minRadius=45, maxRadius=80)
+    if c is not None:
+        vals.append(2 * c[0][0][2])
+print('n=%d median=%.1f min=%.1f max=%.1f' % (len(vals), np.median(vals), min(vals), max(vals)))
+EOF
+# exit 0；n=10 median=118.9 min=113.8 max=129.6（表盘外径约 114–130 px）
+```
+
+### G0-2 附件与缺件
+
+| 项 | 结果 |
+|---|---|
+| 《技术方案.md》 | **已取得**，只读副本路径可用，SHA-256 与交接文档一致；本轮据其核对常量，**未复现其精度/性能**。 |
+| `read_dial.py` | **未取得**（仓库、home 深度 ≤5、桌面/下载/文档/图片、附件目录均无匹配）。 |
+| `calib.json` | **未取得**；附件 §6 只给了字段名和 11 点表的存在性，没有正式角度表。 |
+| `synth_test.py` | **未取得**；合成验证需重写，且二维仿射合成不能证明真实透视。 |
+| `tick_probe.py` | **未取得**；无法用附件方法从样张重建 11 点角度表。 |
+| `fig1_detect.png` / `fig2_scale.png` | **未取得**。 |
+| 900 px 原始样张 | **未取得**；现有 200 帧是 1280×720 远距拍摄（表盘约 119 px），与附件 §2 的 900 px 样张不是同一素材。 |
+| 结论 | **附件算法源码为 0 份，只有文档；G1 属于“需重实现”，不是复现附件。** 仓库内现有 [gauge.py](<src/photo_capture/scripts/gauge.py>) 是旧 Pose 关键点 + 三静态点仿射 + Radon 路线，不是附件路线（见 G0-5）。 |
+
+### G0-3 可用图片清单
+
+| 项 | 事实 |
+|---|---|
+| 路径 | `/home/mowen/Pictures/photo_capture/仪表识别/`（仓库外，未被 Git 跟踪）。 |
+| 数量/格式 | 200 张 JPEG，1280×720，单张约 300 KB；200 个 SHA-256 全不同，无重复帧。 |
+| 分组 | 20 组 × 10 帧；2026-11-14 21:50:27–21:59:02；组内约 0.4 s，组间约 14–67 s。 |
+| 来路 | 文件名符合旧 [Session.save](<src/photo_capture/scripts/capture_photos.py#L491>) 的 `<类型>_<时间戳>_<序号>.jpg`，即旧拍照模式以“仪表识别”为类型保存的相机原帧（JPEG q≈95）；不是新算法产出。 |
+| 表型 | 圆形 deli 风格温湿度表，外圈蓝/红彩环、内圈湿度刻度；与附件所述 deli No.0011 外观一致（**目视，未核对型号丝印**）。 |
+| 真实直径 | 中位约 **119 px**（10 帧 Hough，范围 114–130 px）；远低于附件“≥300 px，建议 400+”的部署线，也不是 900 px 样张。 |
+| 参考值 | **无**人工参考、无标签。所查看帧中表盘下方白色 4 位显示目视为 `1234`，用途未核实，**不得当湿度真值**。 |
+| 蓝段/指针 | 可见：彩环左上蓝段、指针约 11 点方向；但该分辨率下刻度数字不可辨，附件所述双轴心/238 px 关系无法核对。 |
+| 条件覆盖 | 抽查帧基本同一机位、距离、光照（未逐帧测量），仅“正常正视、远距、小表盘”一类；场景内有人走动。**不覆盖**近最低分辨率、滚转、斜视、不同光照等 5 类条件。 |
+| 可用范围 | 只能做冒烟、蓝段/指针可见性、多帧重复性与拒识材料；**不能**作精度真值、不能验证附件 900/450/288 px 指标、不能替代正式标定。 |
+| 压缩包 | `仪表识别.zip` 58,801,104 B，SHA-256 `ac9911c7…`；仅 200 张 jpg，**无脚本、无 calib、无真值表**。 |
+| 其他候选 | 仓库内 16 张图片均为界面截图/其他任务素材（如 `logs/photo_capture_gauge.png` 是旧 GUI 截图）；`~/Pictures/photo_capture` 其余目录为垃圾、车牌、电动车、站房等，未发现表盘样张。 |
+
+### G0-4 依赖与可导入性（未安装任何包）
+
+| 项 | 版本/状态 |
+|---|---|
+| Python | 3.8.10（`/usr/bin/python3`） |
+| NumPy | 1.24.4，可导入 |
+| OpenCV | 活动 `cv2` 4.12.0，可导入；`cv2.getBuildInformation()` 为 `GUI: NONE`（headless 构建） |
+| OpenCV 发行包 | `opencv-python 4.12.0.88`、`opencv-python-headless 4.12.0.88`、`opencv-contrib-python 4.10.0.84` **三套同时存在**；不要安装/替换/降级，避免破坏现有 GUI 环境 |
+| ultralytics | 8.3.239 可导入（旧 Pose 需要）；**新算法不得依赖它** |
+| 其他 | PyYAML 6.0.3、Pillow 10.4.0、tkinter、rospy、cv_bridge 可导入；ROS 为 Noetic |
+| 测试框架 | `pytest` **未安装**（`No module named pytest`）；现有 `src/photo_capture/tests/` 使用 `unittest` |
+| highgui | `src/photo_capture/scripts/` 无 `cv2.imshow/namedWindow/waitKey` 调用；现有 Tk GUI 不依赖 highgui，故 headless 构建未阻断旧功能。G4 不要新增 `cv2.imshow`。 |
+
+### G0-5 现有集成位置与最小接入点
+
+| 能力 | 位置 | 现状/结论 |
+|---|---|---|
+| 相机打开/取帧 | [capture_photos.py](<src/photo_capture/scripts/capture_photos.py#L352>) `Camera.open/read`；CLI `--device 0`、`--width 1280`、`--height 720` | 可复用；G1 不接相机，G4 再用。 |
+| 帧标识 | [GaugeApp._tick](<src/photo_capture/scripts/capture_photos.py#L2909>) 自增 `_frame_id`；[save_readings](<src/photo_capture/scripts/capture_photos.py#L3155>) 写入 `readings.jsonl`（`frame_id` 在 L3168） | **进程内临时编号，重启归零，无图像哈希**；不满足 G2 的“新鲜帧/重复帧”证据要求。G2 必须另建帧身份，不能复用。 |
+| 保存帧 | [Session.save](<src/photo_capture/scripts/capture_photos.py#L491>)；默认输出 [DEFAULT_OUTPUT_DIR](<src/photo_capture/scripts/capture_photos.py#L136>) `~/Pictures/photo_capture` | 命名=类型+毫秒时间戳+序号；G3 需另存原图哈希/采集组。 |
+| 旧仪表 GUI | [GaugeApp](<src/photo_capture/scripts/capture_photos.py#L2769>)、[_process_readings](<src/photo_capture/scripts/capture_photos.py#L2942>)、[save_snapshot](<src/photo_capture/scripts/capture_photos.py#L3133>)、[save_readings](<src/photo_capture/scripts/capture_photos.py#L3155>)、`_reading_root` L2833 | 旧 Pose 模式；**本轮不改**，G4 前也不得改默认行为。 |
+| 旧算法 | [gauge.py](<src/photo_capture/scripts/gauge.py#L184>) `PoseDetector`（L200 运行时导入 ultralytics）、[GaugeRectifier](<src/photo_capture/scripts/gauge.py#L490>)、[compute_fraction](<src/photo_capture/scripts/gauge.py#L101>)、[estimate_pointer_angle](<src/photo_capture/scripts/gauge.py#L450>) | 三静态点仿射 + Radon + 线性比例；**不是附件算法**。可参考其角度环绕/长弧处理，不可直接用于非线性 11 点表，也不得把 `PoseDetector` 拖进新模块。 |
+| CLI/入口 | [MODE_GAUGE](<src/photo_capture/scripts/capture_photos.py#L146>)、[parse_args](<src/photo_capture/scripts/capture_photos.py#L5981>)、[main](<src/photo_capture/scripts/capture_photos.py#L6106>)、`--mode gauge` 与 `--gauge-*` | 新后端将来只增独立模式；G1 只做离线入口，不接此 CLI。 |
+| 文档 | [README 仪表识别模式](<src/photo_capture/README.md#L268-L351>) | 旧 Pose 说明；新算法需另写文档。 |
+| 测试 | `src/photo_capture/tests/*.py`，`unittest`，无 `pytest` | G1 测试沿用 `unittest`，纯离线、无 Tk/ROS/相机。 |
+
+**最小未来接入点（G4，非本轮）**：在 [capture_photos.py](<src/photo_capture/scripts/capture_photos.py#L91>) 现有 `import gauge as gauge_module` 之外，增加**独立**后端导入/模式选择；旧 `gauge.py` 与旧模式保持原样。G1 不创建 GUI/ROS 入口，也不冻结这里的接口。
+
+### G0-6 G1 建议范围（仅供审核，不是冻结接口）
+
+1. **新增独立离线模块**（候选路径，审核后定）：`src/photo_capture/scripts/dial_reading.py`（或同目录独立包），只依赖 `numpy`、`cv2`（不得 import `gauge.PoseDetector`、`yolo_detect`、`ultralytics`），无 ROS/相机/Tk。
+2. **独立标定配置**：`src/photo_capture/config/dial/deli_0011.json`（候选名），必须含版本、表型、参考图来源/哈希、坐标约定、归一化定义、严格递增有限的角度/数值表、`roll_ref_deg`、采样参数；缺失/非单调/NaN 一律报配置错误，不输出读数。
+3. **测试**：`src/photo_capture/tests/test_dial_reading.py`（`unittest`），覆盖角度环绕、蓝段跨界、0/100 端点、空白区、非单调/NaN 标定、近圆/轴交换、无盘/多候选/低覆盖拒识、超量程；合成测试固定随机种子并公开生成规则。
+4. **证据**：G1 另交 `docs/gauge_g1_report.md`（或本文后续追加），列出命令、样本、失败叠图；不把合成当实拍。
+5. **可复用**：算法侧没有可直接复用的附件函数；旧 `compute_fraction`/`_wrap` 只可作角度环绕参考。相机/保存能力留到 G3/G4，复用 `Camera`、`Session`，但需补帧哈希与采集组。
+
+**最小测试命令（G1 落地后）**
+
+```bash
+cd /home/mowen/bit_ws
+python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_reading.py' -v
+# 当前 pytest 未安装；现有 unittest 基线 26/26 通过（见 G0-1）
+```
+
+### G0-7 风险与未覆盖
+
+- **无正式标定、无附件源码、无 900 px 样张**：附件的 900/450/288 px 误差、11–28 ms、±6° 滚转补偿等均**未复现**，不得写成已实现。
+- **现有 200 帧表盘仅约 119 px**：低于附件 ≥300 px 部署线，印刷刻度不可辨；不能用于精度验收，也不能证明附件低分辨率跳峰结论。
+- **条件单一**：抽查未见多机位/多光照变化，不满足 G2 的 5 类条件与独立验收集；不能把“20 组”当 20 种条件。
+- **无真值**：白色显示 `1234` 不是湿度参考；没有人工核读区间，任何读数都无精度意义。
+- **OpenCV 三包并存 + headless 构建**：不要安装/替换；新代码只用 `cv2` 算法 API，不碰 highgui。
+- **旧 Pose 耦合 ultralytics**：新模块若 import 旧 `gauge`/`yolo_detect`，会把 YOLO 依赖带入离线测试；G1 明确隔离。
+- **帧身份不足**：旧 `frame_id` 进程内自增、无哈希；G2 必须另建。
+- **素材在仓库外**：200 张图和 zip 不得擅自搬入仓库/提交；需要时只提供清单与哈希。（本轮未复制、未改原图。）
+
+### 材料请求/裁决（仅一项）
+
+**请提供附件 §2 所用的 900 px 原始样张**（或等效的 ≥400 px、正面、能看清刻度的 deli No.0011 原图），附来源与 SHA-256。用途：核对轴心/椭圆/蓝色段常量，并据此建立正式 11 点角度表；没有它，G1 只能做重实现 + 数学/拒识/合成测试，不能输出真实 `%RH`。
+
+若无法提供，请裁决：**G1 是否允许在“无正式标定”前提下先做合成/拒识/数学测试，并明确禁止输出有效湿度值**（仍不得宣称真实精度）。
 
 ## 8. 审核区（决策方追加）
 
@@ -218,6 +403,36 @@ G0 没有代码补丁/图像指标时写“不适用”，提交核查命令及�
 - 发布 G0；G1–G4 暂未发布。
 - 无算法验收结果；无相机/ROS/底盘运行测试；无实机放行。
 - 后续审核记录须包含：回报编号、所审版本、复核证据、结论、修改要求、解锁任务及边界。
+
+### A01：G0-R1 审核——需修改，未解锁 G1
+
+**受审版本**：HEAD `78b1984852b362fb86c907aa55c78bb1532fdee6` 上的未提交 G0-R1；审核前本文 SHA-256 `c13828a16a63ca48b8f5c3ad68ce19988baa1a3f6b66e69416a20be94813d280`。G0-R1 原文保留，冲突处以下述复核与 D05 为准。
+
+**独立复核通过**：
+
+- 旧算法/入口/说明三个文件哈希与回报一致；本文基线哈希与提交中版本一致。Git差异显示 G0 回报只修改本文，旧有无关改动仍在；未发现新增识别代码。
+- 仓库内再次按名称检索，仍未找到附件列出的四个脚本/标定。此结论限已检查范围，不推断用户所有环境均不存在。
+- 读取两张代表原图，确认均为1280×720、场景近似一致且存在上下两个独立指针轴心。读取全部200图，尺寸一致，文件哈希200个不同。
+- 复跑回报中的外表盘Hough测量：10个候选，直径中位118.92 px，范围113.76–129.60 px。此临时ROI仅用于复核统计，不批准作为运行时硬编码定位。
+- 压缩包大小58,801,104 B及SHA-256与回报一致；实际为**201个条目：200张JPG和1个目录条目**，没有脚本或标定。
+- 独立导入并确认Python 3.8.10 / NumPy 1.24.4 / cv2 4.12.0（GUI NONE）；三个OpenCV发行包并存，pytest未安装。未安装/替换任何包。
+- 未复跑无关热像单元测试，也未开启相机/ROS；其26项通过不能代替湿度识别测试。本轮所有核查命令exit 0；无湿度精度/性能验收结果。
+
+**必须更正的发现**：
+
+1. **P1：温湿度目标混淆。** G0-3将“外圈蓝红环、指针约11点”写作本任务可用蓝段/指针证据；这主要描述温度长针与温度环，没有分别核查下方湿度环与湿度针。119 px又是整表外径，不能等同湿度环尺度。必须分别说明两轴/两环、目标湿度指针的可辨认性及不确定性，不强猜当前湿度值。未澄清前不允许开始找针实现。
+2. **P2：哈希与帧身份推论过强。** “200个SHA不同”只说明无字节完全重复文件；不是独立/新鲜帧证明。“旧frame_id必须另建、不能复用”的结论没有依据，按D05改为可扩展现有编号。重读已有帧处理函数即可，不需要开发查重系统。
+3. **P3：材料清单与来源措辞。** ZIP实际包含一个目录条目，纠正“非jpg条目为0”；“文件名符合旧保存规则”只支持来源推测，不能单凭命名证明相机原帧及确切编码质量。未有额外证据就降级措辞。
+
+**定向返工 G0-R2（本轮唯一发布项）**：
+
+- 只在DS回报区追加一份简短更正，逐项对应上述3条；保留G0-R1原文，注明哪些旧表述被替代。完成后将G0状态改为“待审核（G0-R2）”。
+- 使用现有代表原图，分别记录整表/温度部分/湿度小环的目标含义。湿环尺寸如无法可靠量取，允许写“明显小于整表、未定量”；不得为填数字编造测量，不要求训练模型或写检测程序。
+- 给出未来最小帧身份建议：会话/采集组 + 现有frame_id + 采集时刻；解释哈希能证明什么、不能证明什么，不冻结G2接口。
+- 修正ZIP和素材来源的证据等级；现有缺源码/缺正式标定结论可沿用，不再全home检索，不再运行无关测试。
+- **验收条件**：3条逐项回应，目标湿度与温度不再混用，没有新算法/配置/相机/环境变更；无需用户新增素材即可完成。回报后停下等审，不重复长日志。
+
+**下一阶段裁决**：G1仍未发布。G0-R2通过后，可优先考虑“G1a数学/标定校验与合成拒识”，避免等待素材期间空转；正式单帧湿度读数仍需清晰标定图。用户只需提供附件原始样张或等效清晰正面原图，不要求自行计算哈希。现有119 px整表图暂用于低分辨率拒识材料，不作真实精度真值。无任何实机许可。
 
 ## 9. 实机记录区（用户提供事实后追加）
 
