@@ -1,7 +1,7 @@
 # 仪表识别：决策、派工与审核交接
 
-> 建立日期：2026-11-15（Asia/Shanghai）｜文档版本：v8（G1b0-R1审核后）
-> 当前阶段：**G1b0-R1需修改（A07）：候选几何可复算，但存在输入误删、写图失败误报成功及零向量几何漏检。仅执行G1b0-R2；G1b1及G2–G4仍未发布，不得接车。**
+> 建立日期：2026-11-15（Asia/Shanghai）｜文档版本：v9（G1b0-R2审核通过）
+> 当前阶段：**G1b0-R2通过（A08）；候选仅作为离线开发参考。发布第5.6节G1b1指定ROI单帧验证；自动全图找表、G2–G4均未发布，不得接车。**
 > 当前结论：仅数学与表结构校验通过；**没有正式标定，没有图像识别精度/性能验收，没有实机放行。**
 > 本文件是决策与任务状态的唯一台账；代码、数据和长日志通过链接引用，不在两个对话中重复粘贴。
 
@@ -11,12 +11,12 @@
 
 ```text
 请先读取仓库根目录 AGENTS.md 和 docs/gauge_reading_handoff.md。
-你是实现方；先读审核区A07。本轮只执行G1b0-R2定向修复，不重做整轮标注或扩展检测器。
-修复输出安全、写图失败处理，以及刻度/蓝段点与湿度轴心重合时的无效几何拒绝；补故障回归。
-不清理旧复核文件；新复核产物写到新的空目录，例如 .gauge_calibration_review/r2。
-原图、标注和数学内核保持原样，除非能明确证明标注有误并在回报中解释，不为过测试调几何。
-按A07报告故障测试和原图候选复算结果；不把候选或灵敏度诊断当真实湿度精度。
-不改旧YOLO/GUI/ROS，不安装包，不接车，不commit/push。完成追加G1b0-R2并停在待审核。
+你是实现方；先读审核区A08和第5.6节。G1b0-R2已通过，不再返工标定工具。
+本轮只做G1b1：显式指定湿度ROI的离线单帧检测，不做自动全图找表、多帧、GUI或接车。
+使用A08绑定的候选表作为显式开发参考，不把候选改成默认正式calib，不按文件名硬编码轴心/指针。
+只新增dial_reading.py及test_dial_reading.py并追加回报；已通过文件和旧YOLO保持原样。
+必须输出原图对应叠图与角度/峰竞争/覆盖率诊断；单帧候选值不得作为最终可信读数。
+完成G1b1-R1审核包后停下，不安装依赖，不commit/push，不自行解锁下一阶段。
 ```
 
 两个对话**不会自动同步消息**。同一工作区以磁盘上的本文为准；用户在我这里说“审核 G0”即可触发审核。若不共享文件系统，用户需传递最新版本文，以及所引用的补丁、数据清单和证据。不存在后台自动派工、自动审查或定时执行。
@@ -137,7 +137,7 @@
 | 编号 | 任务 | 当前状态 | 何时开始/何时停 |
 |---|---|---|---|
 | G0 | 输入与证据核查 | **审核通过（G0-R2 / A02）** | 核查阶段结束；不代表算法已实现或有效 |
-| G1 | 独立离线单帧最小实现 | **G1b0需修改（A07，待G1b0-R2）；G1b1待发布** | 仅修输出安全、失败报告及无效几何；G1b1不解锁，不接实机 |
+| G1 | 独立离线单帧最小实现 | **G1b0通过（A08）；G1b1已发布，尚未回报** | 仅执行第5.6节指定ROI离线单帧验证；G1整体未验收，不接实机 |
 | G2 | 多帧、反例与离线评测 | 待发布 | G1 审核通过后另行发布 |
 | G3 | 停稳小车上的实机采集测试 | 待发布 | G2 证据通过、审核方签发明确实机许可后开始 |
 | G4 | CLI/GUI及后续巡航接入 | 待发布 | 实机结果通过后另行冻结接口与修改清单；巡航另设放行点 |
@@ -234,6 +234,37 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/test
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_math.py' -v
 ```
 
+### 5.6 G1b1：指定湿度ROI的离线单帧验证（A08当前唯一发布项）
+
+**目标与范围**：先验证“环/蓝段/针能否从像素里被可靠分开”，不再扩展标定工具。首版由命令行显式传入湿度ROI，避免温度长针/大环干扰；ROI属于可见场景先验，必须记录，不能宣称全图自动识别。仅新增 `src/photo_capture/scripts/dial_reading.py`、`src/photo_capture/tests/test_dial_reading.py`，追加本文回报/状态；不改已通过文件、标注、旧YOLO及GUI/ROS，不安装包，不接相机/底盘，不联网或commit/push。
+
+**入口/数据约定**：
+
+- CLI：`python3 src/photo_capture/scripts/dial_reading.py <image> --calib <A08候选JSON> --allow-candidate --roi x y w h --debug-dir <新的空目录>`。ROI为原图像素矩形，正整数且完整在图内，叠图坐标回到原图。不得按图像文件名、已知参考轴心或已知针角返回结果；原图ROI可由标注环点包围盒加边距显式计算并记录，但检测轴心/角度必须来自本次图像。
+- 冻结纯处理入口`estimate_frame(image_bgr, calibration, roi) -> dict`，不读文件、不写文件/开线程；CLI负责读图、配置与落盘。校准缺失/结构错误、ROI不合法、图不可读返回非零且不伪装无盘。加载候选须显式opt-in并校验A08候选内容哈希，继续调用已通过数学内核；不再依赖参考原图可用，不把候选标记篡改为正式。
+- stdout输出一个JSON；正常图像拒识不是程序异常。沿用五类状态及原因码，但增加诊断字段`frame_status`、`candidate_value`。即使单帧质量通过，也只能`frame_status=ok`、顶层`status=low_conf`、`value=null`、`reason=multi_frame_required`；候选浮点值只在`candidate_value`，不能冒充最终读数。单帧失败时`candidate_value=null`，顶层反映失败；`spread_deg=null`，记录帧标识/哈希、ROI和标定版本。
+
+**冻结算法主线与拒绝条件**：
+
+1. ROI内HSV饱和度/颜色掩膜定位湿度环，拟合与候选一致的**彩带外边缘**；保留SPD圆化，不用长轴方向作滚转参考。若无环、拟合退化、残差过大或有多个同等可信候选，明确拒识，不按最小椭圆盲选。阈值集中为具名常量，回报中列出，不隐式按测试图切换。
+2. 不能混用外缘和内缘的归一化半径。以拟合环中心先按rho=0.94采样蓝段，最长连续蓝段按环形处理；丢失/断裂歧义时拒识。参考中点必须来自A08候选，不固定用附件196.4°。
+3. 轴心不得拿表壳中心替代。最小偏移迁移方法：候选给出`d0=A_ref*(axis_ref-center_ref)`，先用环心测运行时/参考蓝段中点差得初始roll；按`axis=c+inv(A)*R(roll)*d0`迁移轴心，再相对该轴心重测蓝段roll并更新一次轴心。参考环心中点由候选中蓝段边界/环心实测计算，不误用轴心中点；两次roll差>0.5°则拒识。回报局限：这是近正视仿射近似，非通用透视解；真实轴心定位/强透视另审，不擅自加模型。
+4. 围绕更新轴心，在归一化rho=[0.14,0.70]、70个径向点、3600角度上计算暗度/径向覆盖率与高通后的候选峰；初值暗度`max(150-gray,0)`、有效暗度>15、覆盖率≥0.70。曝光不合适则报告质量不足，不为出值隐式改变阈值。记录主次峰、峰间角差和覆盖率；近邻峰先合并，竞争峰无法判别则拒识，不能仅取最暗线而不报告竞争。
+5. 扣roll、相对零点展开、量程检查及非线性查表复用G1a。空白区返回`out_of_range`，不夹紧。调试叠图须画实测环/蓝段/迁移轴心/轴→针的线，图旁标出补偿前后角度、候选值及拒识原因。输出沿用A07安全原则：新空目录，写失败非零，不覆盖源图或旧成果。
+
+**验收与证据**：
+
+- 保留24项标定和27项数学回归；新增无盘/多环歧义、蓝段跨0°/缺失、近圆/轴交换、ROI坐标回映、配置错误、伪针竞争、量程端点/空白区、输出失败测试。合成指针须在源图副本中去除原针再绘制，固定种子和参数，明确不是独立实拍。
+- 源参考图在顶部空白区：应检出并给`frame_status=out_of_range`；若质量不足可拒识，但须交失败叠图并写“参考图检测未完成”，不能把拒识当识别成功。
+- 合成角度覆盖0/10/…/100及15湿度附近，滚转至少-6/0/+6°，整表缩放目标至少900/450/300 px（湿环尺度另记），模糊至少两档；记录每例角度误差、候选值误差、拒识及错峰，不设未经独立实拍证明的成功率承诺。量程内质量通过的合成案例，候选值误差应≤2 %RH；若达不到，先交证据，不靠放松质量门槛通过。
+- 原有200张约119 px整表图仅作低分辨率挑战，至少处理代表帧并记录可见性/拒识；没有真值不计算真实MAE。单帧源码/测试/合成规则与完整指标清单及成功/失败叠图组成G1b1-R1。候选输出仅供离线审核，G2多帧、自动ROI和实机均未发布。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_reading.py' -v
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_calibration.py' -q
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_math.py' -q
+```
+
 ## 6. 验收、审核包与放行
 
 ### 6.1 必测与指标
@@ -288,6 +319,8 @@ G1a-R1 已提交（2026-11-15，Asia/Shanghai），状态：**待审核（G1a-R1
 G1a-R2 已提交（2026-11-15，Asia/Shanghai），状态：**待审核（G1a-R2）**。仅修端点吸附并补回归；G1b/G2–G4 仍未发布，未接车。
 
 G1b0-R1 已提交（2026-11-15，Asia/Shanghai），状态：**待审核（G1b0-R1）**。仅新增离线候选标定工具、标注、测试与本地复核产物；G1b1/G2–G4 仍未发布，未接车。
+
+G1b0-R2 已提交（2026-11-15，Asia/Shanghai），状态：**待审核（G1b0-R2）**。仅修输出安全、原子写入和零向量拒绝并补故障回归；G1b1/G2–G4 仍未发布，未接车。
 
 <!-- DS 从此处追加 G0-R1；引用现有文件时使用仓库根相对路径链接。 -->
 
@@ -711,6 +744,58 @@ git diff --check
 - 参考图湿度针指向顶部空白区；本轮未计算该针角、未输出读数，也未把其当量程内真值。
 - 输出目录 `.gauge_calibration_review/` 是本地复核产物，**未提交**；候选不能作为默认正式 `calib.json`。
 
+### G1b0-R2 定向修复审核包（输出安全/原子写入/零向量）
+
+| 字段 | 内容 |
+|---|---|
+| 任务/回报编号 | G1b0-R2 |
+| 本轮结论 | **待审核**（不是正式标定通过；G1b1 未发布、未启动） |
+| 版本 | 实际基线 HEAD `36b550991401f285eccaf4afb97e0b8853f12052`；本文基线 SHA-256 `89cd3e5f76d8520ac4fc5ed67f638d450915198efa9f32c7b613cec64ed28ebc`。工具 `dial_calibration.py` `1dacb5c9bdec9bc642c291badf18c645f91cd7fdaadd5a875c67440ec710663e`；测试 `test_dial_calibration.py` `7f1e59089a15786ae3e3a887b623d8124bf1c9283509b7a2bb9edb7b28f76408`；标注仍为 `90639daf…`；数学内核/测试仍为 `05aabd4a…`/`ab206cfd…`；源图仍 `be71a511…`。R2 候选 `d7dccc3e6d80f24199405dce07a516fd119d4502724efa413983682d2e5df198`；R2 叠图 `468472fb…`；旧 R1 候选/叠图 `897fe4f9…`/`468472fb…` 未变。 |
+| 改动 | 1. `run` 输出目标改为“不存在或空目录”，非空/文件/符号链接/输入同路径或位于输出内一律拒绝；**不再删除任何旧候选/叠图/输入**。2. 用临时文件写出叠图/JSON，检查 `cv2.imwrite` 返回值与异常、JSON 写入异常，二者都成功后才发布；失败只清理本次临时/半成品。3. `MIN_VECTOR_NORM_PX=1e-6`：刻度/蓝段相对湿度轴心的零向量在 `validate_annotations` 与 `angle_from_axis` 均抛 `CalibrationError`。4. 测试 16→24 项；旧的“删除旧候选”测试改为“非空输出不变”回归。5. 未改源图/原始标注/数学内核/YOLO/GUI/ROS；未装依赖；未 commit/push。 |
+| 验证 | CLI 写入新空目录 `.gauge_calibration_review/r2-final` → exit 0；`test_dial_calibration.py` → exit 0，**Ran 24 tests, OK**；`test_dial_math.py` → exit 0，**Ran 27 tests, OK**；`git diff --check` → exit 0；新文件无尾随空白、无 `dial_*` 的 `.pyc`。旧 R1 候选/叠图哈希运行前后不变。 |
+| 数据/标定 | 源图/标注不变；候选 11 点表与 R1 相同（`[314.310, 350.715, 384.575, 415.426, 444.269, 472.785, 499.836, 526.592, 551.689, 573.030, 585.336]`）；仅新增灵敏度统计口径。仍无正式 `calib.json`、无真实湿度读数/精度。 |
+| 证据 | [R2 candidate](<.gauge_calibration_review/r2-final/candidate_calib.json>)、[R2 overlay](<.gauge_calibration_review/r2-final/calibration_overlay.png>)。旧 `.gauge_calibration_review/` R1 及修复前的 `.gauge_calibration_review/r2` 均未删；最终链接是 `r2-final`。 |
+| 风险 | 仅修工具安全和无效几何；未实现运行时检测、无相机/ROS/模型、无实拍精度；标注仍为人工/半自动，近圆椭圆与参考湿度针空白区限制同 R1；输出目录策略要求每次用新空目录，无 `--force`。 |
+| 下一步 | 交审核方复核；**不启动 G1b1/G2–G4**。 |
+| 需要裁决 | 无新增；审核方签发前不进入 G1b1。 |
+
+**故障回归覆盖（24 项中新增/改写）**
+
+| 故障 | 结果 |
+|---|---|
+| 输出目录非空（含旧 `candidate_calib.json`） | 拒绝；旧文件内容/数量不变 |
+| 输出不存在 / 已存在空目录 | 允许；成功写出两份最终文件 |
+| 标注在输出目录内 / 输出等于图像路径 | 拒绝；输入哈希不变 |
+| `cv2.imwrite` 返回 False | `CalibrationError`；无候选/叠图/临时文件 |
+| `cv2.imwrite` 抛异常 | `CalibrationError`；同上 |
+| JSON 写入失败（`Path.write_text` OSError） | `CalibrationError`；叠图临时文件清理，无半套产物 |
+| 刻度点与湿度轴心重合 | `CalibrationError`；不产候选 |
+| 蓝段边界与湿度轴心重合 | `CalibrationError`；不产候选 |
+| `angle_from_axis` 零向量 | `CalibrationError` |
+
+**灵敏度统计口径（A07 非阻塞备注）**
+
+- 本轮 `sensitivity` 新增计数：`interpolable_tick_perturbations=40`、`out_of_range_tick_perturbations=4`、`interpolable_axis_perturbations=4`、`out_of_range_axis_perturbations=0`。
+- `wet_end_value_delta_per_px=0.293887` 仅对 `lookup_value` 非 None 的扰动统计；量程外扰动单独计数，**不当零误差**。该数字仍只是诊断，不是总体精度上界。
+- 四方向 ±1px 仍是有限采样，不是完整误差模型；边缘/相机差异仍只是解释假设，未认定为已证实。
+
+**验证命令**
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 src/photo_capture/scripts/dial_calibration.py \
+  --image /home/mowen/.dsh/attachments/v1/objects/be/be71a511ebfe297c18c86feebc8d99cdefe9030e507a82e65f50d2aed8d36f30 \
+  --annotations src/photo_capture/config/dial/deli_0011_annotations.json \
+  --output-dir .gauge_calibration_review/r2-final
+# exit 0
+
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_calibration.py' -v
+# exit 0；Ran 24 tests ... OK
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_math.py' -v
+# exit 0；Ran 27 tests ... OK
+git diff --check
+# exit 0
+```
+
 ## 8. 审核区（决策方追加）
 
 ### A00：初始化
@@ -837,6 +922,16 @@ git diff --check
 **非阻塞诊断备注**：现有±1px灵敏度仅采四个方向，且量程外扰动返回None时未统计为失败；0.294 %RH/px不是总体精度上界。R2回报应列明量程外扰动次数及“仅对可插值扰动”的统计口径，不必扩写复杂误差模型。边缘/相机导致附件常量差异目前也只是解释假设，不认定已证实。
 
 **结论**：G1b0-R1需修改，几何表不要求无证据重标，G1b1仍未发布。此次审核只更新本文；无正式标定签发、无实机许可。
+
+### A08：G1b0-R2审核通过，发布指定ROI单帧验证
+
+- **受审版本**：HEAD `36b550991401f285eccaf4afb97e0b8853f12052` + 未提交R2；工具SHA-256 `1dacb5c9bdec9bc642c291badf18c645f91cd7fdaadd5a875c67440ec710663e`，测试`7f1e59089a15786ae3e3a887b623d8124bf1c9283509b7a2bb9edb7b28f76408`；审核前本文SHA-256 `8868fb10e30796e21a5b35d89987de3cb5d0ed5552ff8f8d7de2120447a77b88`。
+- **结论：G1b0通过。** A07三项缺陷均关闭：非空/冲突输出安全拒绝，输入与旧产物保留；检查写图结果、临时文件发布并在失败时回滚；刻度/蓝段零向量以1e-6 px数值阈值拒绝。原标注、11点几何及R1产物未变，无需重标。
+- **独立验证**：24项标定回归0.584秒、27项数学回归0.047秒，均exit 0；另外注入“第二个最终文件os.replace失败”，确认首个已发布文件与临时文件回滚、无半套结果，输入仍在。R1/R2候选的table/ring/axis_offset/blue/ticks逐项完全一致。没有为了验证覆盖或删除真实复核文件。
+- **证据绑定**：[R2候选](<.gauge_calibration_review/r2-final/candidate_calib.json>) SHA-256 `d7dccc3e6d80f24199405dce07a516fd119d4502724efa413983682d2e5df198`；[R2叠图](<.gauge_calibration_review/r2-final/calibration_overlay.png>) `468472fbc2c7047b7e3b163c2d7204ee2004ae5eee08fdba049c854b01ac7b89`。标注仍为`90639daf…`，源图仍为`be71a511…`。
+- **诊断口径已补齐**：刻度扰动40次可插值、4次越界；轴心扰动4次可插值、0次越界。0.293887 %RH/px只作四方向局部诊断，不认定为总体精度上界。两文件发布有异常回滚，不将其夸大为进程崩溃/并发下的整组事务保证；本轮只支持单写者离线工具。
+- **D11**：接受该候选作为显式指定、哈希绑定的**离线开发参考**，不是生产正式标定，也不作为默认配置。发布第5.6节G1b1：先指定湿度ROI验证像素到角度/候选值的链路，暂不解决自动全图找表，最终可信数值留到多帧与实拍验收。不得在算法里写死参考图轴心或绕过拒识。
+- **下一步**：DS重读首页，只实现G1b1并提交R1后停下。本审核方仍只改本文，不代写识别代码；G2–G4未发布，没有实机许可。若用户授权上传，本轮可提交工具、测试、原始标注和本文4个文件；源图及整个本地复核目录均不入库，其他改动不混入。
 
 ## 9. 实机记录区（用户提供事实后追加）
 
