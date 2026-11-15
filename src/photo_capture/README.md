@@ -8,8 +8,8 @@
   可换模型、调置信度、保存带框截图。
 - **区域扫描模式**：控制麦轮底盘横向平移，停一下拍一张，最后拼成横向大图；
   也可不用底盘、手动遥控平移，脚本只负责抽帧和拼接。拼接后可用 YOLO 分块检测全景。
-- **仪表识别模式**：加载 Pose.pt，识别温度/湿度表的旋转轴、指针尖端、最小/最大刻度，
-  按量程换算读数，保存截图和 JSONL 记录。
+- **仪表识别模式**：加载 gauge.pt，识别温度/湿度表的轴、尖端和 5 个刻度点，
+  按多刻度插值读数，保存截图和 JSONL 记录。
 - **红外热像模式**：通过 `mlx90640_ros.thermal_session` 显示 MLX90640 热图，
   支持 `capture.bin` 回放、串口实机、楼层标定和 PNG+JSON 快照。
 
@@ -265,47 +265,45 @@ rosrun photo_capture capture_photos.py --no-gui --mode scan --scan-mode strafe \
 
 CLI 自动扫描默认会先打印摘要并等回车确认；`--yes` 跳过。
 
-## 仪表识别模式（Pose）
+## 仪表识别模式（gauge.pt）
 
-针对圆形温度/湿度表：模型 `~/AI视觉/Pose.pt` 输出 4 个关键点：
+默认模型：`~/AI视觉/gauge.pt`，`task=pose`，`nc=2`，`kpt_shape=[7,3]`。
 
-- 0 = 指针旋转轴（静态）
-- 1 = 指针尖端（动态）
-- 2 = 量程最小值刻度（静态）
-- 3 = 量程最大值刻度（静态）
+| 类别 | 关键点（0~6） | 量程 |
+| --- | --- | --- |
+| `temperature` | axis, tip, min_value, scale_-10, scale_10, scale_30, max_value | -30 ~ 50 °C |
+| `humidity` | axis, tip, min_value, scale_20, scale_40, scale_70, max_value | 0 ~ 100 %RH |
 
-类别：`temperature` / `humidity`。
+- 0 轴、2 最小、3/4/5 三个中间刻度、6 最大，这 **6 个静态点**；
+- 1 是指针尖端，动态，**不参与配准**；
+- 6 个静态点已经可以做真正的 **4 点单应**（`cv2.findHomography`），不再受“只有 3 个静态点”的限制。
 
 ### 正视化与读数
 
-当前 Pose.pt 只有 **3 个静态点**（轴、最小、最大），所以配准只用这 3 个点做
-**仿射 warp**，`tip` 绝对不参与配准：
+1. 第一次识别到某类表时自动标定模板：静态点按实际角度映射到 512×512 正视空间，
+   模板存到 `~/Pictures/photo_capture/仪表识别/<模型名>/templates/<类别>.json`；
+2. 每帧用 6 个静态点做单应 `warpPerspective`，`tip` 不参与 warp；
+3. 正视空间里用 Radon 找指针方向，`tip` 只作搜索先验，不明显更优时回退 `tip`；
+4. 用三个中间刻度做**分段线性插值**，而不是只用首尾刻度：
+   - 温度：-30, -10, 10, 30, 50；
+   - 湿度：0, 20, 40, 70, 100。
 
-1. 第一次识别到某类表时自动标定模板：轴映射到 512×512 中心，最小/最大刻度按
-   实际角度映射到半径 190 的圆上，模板存到
-   `~/Pictures/photo_capture/仪表识别/<模型名>/templates/<类别>.json`；
-2. 每帧只把当前 轴/最小/最大 映射到模板三点，`cv2.warpAffine` 得到 512×512 正视图；
-3. 在正视空间里用 Radon（沿射线找最暗的指针线）算指针角度，`tip` 只作为搜索先验，
-   Radon 不明显更优时回退到 `tip`；
-4. 按模板里的最小/最大刻度弧算比例，再按量程换算读数。
+例如指针落在 10 和 30 之间，就按 10~30 这一段插值；比只按 -30~50 线性换算更贴近实际表盘。
 
-因为 `tip` 不参与 warp，指针转动不会改变正视化图像，也就不会出现“每帧模板不同导致读数飘”。
+第一次使用建议让表盘正对相机，按 `T` 标定一次；模板不对也按 `T` 覆盖。按 `V`
+可以查看当前 512×512 正视化图像。
 
-> 3 点只能做仿射，强斜视时仍有透视误差；要做到真正的 4 点单应，需要给 Pose 模型
-> 再加一个**静态**关键点（logo、螺丝、固定刻字、底边中点等）。当前版本不把 tip 当第四点。
-
-默认量程是 `0–100`（温度 °C、湿度 %RH），**请按实际表盘改**：
+默认量程已写入代码：温度 `-30~50`，湿度 `0~100`；需要改时：
 
 ```bash
 rosrun photo_capture capture_photos.py --mode gauge \
-  --gauge-temp-min -20 --gauge-temp-max 60 \
+  --gauge-temp-min -30 --gauge-temp-max 50 \
   --gauge-humidity-min 0 --gauge-humidity-max 100
 ```
 
 常见表计的刻度从最小值经顶部绕到最大值，默认用**长弧** `--gauge-arc long`；
 如果表盘是短弧，换 `short`，拿不准用 `auto`。指针角度默认 `--gauge-pointer radon`，
-也可以切 `tip` 直接使用模型尖端。Radon 假设指针比表盘暗；如果指针是亮色/强反光，
-优先用 `tip` 或调整光照。
+也可切 `tip` 直接使用模型尖端；Radon 假设指针比表盘暗，亮指针/强反光时优先 `tip`。
 
 ### 界面操作
 
@@ -314,13 +312,12 @@ rosrun photo_capture capture_photos.py --mode gauge \
 | 点「更换模型」 / `M` | 换一个 `.pt`（必须是 pose 任务） |
 | 点「重新标定」 / `T` | 用当前检测覆盖该类别的正视化模板 |
 | 点「正视化」 / `V` | 查看 512×512 正视化图像 |
-| 点「保存当前帧」 / `S` | 保存带关键点和读数的截图 |
+| 点「保存当前帧」 / `S` | 保存带 7 个关键点和读数的截图 |
 | 点「保存读数」 / `R` | 把当前读数追加到 `readings.jsonl` |
 | 点「打开记录目录」 | 打开当前模型的记录目录 |
 | `Esc` / 关窗口 | 退出 |
 
-第一次使用建议让表盘正对相机，等识别稳定后按 `T` 标定一次；模板不对时也按 `T` 覆盖。
-截图和读数保存到：
+保存位置：
 
 ```
 ~/Pictures/photo_capture/仪表识别/<模型名>/
@@ -329,18 +326,19 @@ rosrun photo_capture capture_photos.py --mode gauge \
 └── readings.jsonl
 ```
 
-`readings.jsonl` 每行是一条记录，包含时间、模型、类别、读数、量程比例、指针角度、
-目标置信度、关键点坐标、关键点置信度和模板名。
+`readings.jsonl` 包含时间、类别、读数、单位、归一化比例、指针角度、目标置信度、
+7 个关键点坐标、关键点置信度和模板名。
 
 ### 命令行
 
 ```bash
 rosrun photo_capture capture_photos.py --no-gui --mode gauge \
-  --pose-model ~/AI视觉/Pose.pt --gauge-conf 0.5 --gauge-kpt-conf 0.3
+  --pose-model ~/AI视觉/gauge.pt --gauge-conf 0.5 --gauge-kpt-conf 0.3
 
 # 指定量程、弧和指针算法
 rosrun photo_capture capture_photos.py --no-gui --mode gauge \
-  --gauge-temp-min 0 --gauge-temp-max 50 --gauge-humidity-min 20 --gauge-humidity-max 90 \
+  --gauge-temp-min -30 --gauge-temp-max 50 \
+  --gauge-humidity-min 0 --gauge-humidity-max 100 \
   --gauge-arc long --gauge-pointer radon
 ```
 
@@ -348,7 +346,7 @@ rosrun photo_capture capture_photos.py --no-gui --mode gauge \
 自动标定到输出目录下。
 
 > 模型必须是 pose 任务；选错普通检测模型会提示“所选模型不是 pose 模型”。
-> 关键点置信度低于 `--gauge-kpt-conf`、或关键点挤成一团时不会算读数，界面/终端会显示原因。
+> 关键点置信度低于 `--gauge-kpt-conf`、或关键点挤成一团时不会算读数。
 
 ## 红外热像模式（MLX90640）
 
@@ -507,13 +505,13 @@ rosrun photo_capture capture_photos.py --no-gui --mode thermal \
 | `--scan-dry-run` | 关 | 干跑，不连接 ROS、不产生真实运动 |
 | `--detect-panorama` | 关 | 拼接后用 YOLO 分块检测 |
 | `--yes` | 关 | CLI 自动扫描免确认 |
-| `--pose-model` | `~/AI视觉/Pose.pt` | 仪表 Pose 权重 |
+| `--pose-model` | `~/AI视觉/gauge.pt` | 仪表 Pose 权重 |
 | `--gauge-conf` | `0.5` | 仪表目标置信度 |
-| `--gauge-kpt-conf` | `0.3` | 4 个关键点的最低置信度 |
+| `--gauge-kpt-conf` | `0.3` | 关键点的最低置信度 |
 | `--gauge-arc` | `long` | `long` / `short` / `auto` 刻度弧 |
 | `--gauge-pointer` | `radon` | `radon` 正视化后射线搜索 / `tip` 模型尖端 |
-| `--gauge-temp-min` | `0` | 温度量程下限 |
-| `--gauge-temp-max` | `100` | 温度量程上限 |
+| `--gauge-temp-min` | `-30` | 温度量程下限 |
+| `--gauge-temp-max` | `50` | 温度量程上限 |
 | `--gauge-humidity-min` | `0` | 湿度量程下限 |
 | `--gauge-humidity-max` | `100` | 湿度量程上限 |
 | `--force` | 关 | 忽略 `/cmd_vel` 上其他发布者的冲突 |
@@ -596,10 +594,11 @@ YOLO 裁剪图（按模型 / 类别）：
 - **拼接失败**：帧太少、重叠不足、纹理太少或运动模糊都可能导致失败；原始帧都保留，
   可以增加帧数/减小步长重拍，或直接用帧。
 - **模型测试/全景检测报没有 ultralytics**：`pip3 install ultralytics`，并确认用的是同一个 Python。
-- **仪表识别报“不是 pose 模型”**：要用 Pose.pt 这类姿态权重，不能选普通检测模型。
-- **仪表读数不对**：先确认量程（`--gauge-temp-min/max`、`--gauge-humidity-min/max`）和
-  刻度弧（`long/short/auto`）；默认长弧适合大多数圆形表。第一次模板标定最好正对表盘，
-  模板不好时按 `T` 重标；强斜视需要给模型加静态第 5 点后做 4 点单应。
+- **仪表识别报“不是 pose 模型”**：要用 gauge.pt 这类姿态权重，不能选普通检测模型。
+- **仪表读数不对**：先确认量程（默认温度 -30~50、湿度 0~100）和刻度弧
+  （`long/short/auto`）；默认长弧适合大多数圆形表。第一次模板标定最好正对表盘，
+  模板不好时按 `T` 重标。中间刻度按 -10/10/30 和 20/40/70 插值，如果表盘刻度值
+  不是这几个数，需要改 `gauge.py` 里的 `gauge_spec_for()`。
 - **CPU 上很慢**：`--imgsz 416`，或关掉其他占 CPU 的程序；有 GPU 用 `--infer-device cuda`。
 - **拍照还是糊**：确认终端打印的“摄像头画面”是 1280×720，且锐度默认 3；弱光/固定对焦
   （多数小相机）/运动仍会造成模糊，保持静止、补光，或试 `--sharpness 6`、1080p 看细节。

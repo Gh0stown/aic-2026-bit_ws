@@ -10,7 +10,7 @@
     或「红外热像模式」；
     模型测试模式会加载 ~/AI视觉 下的 .pt 权重，实时画框显示识别结果；
     区域扫描模式控制麦轮底盘横向平移，逐帧拍摄并拼成横向大图；
-    仪表识别模式加载 Pose.pt，识别温度/湿度表并计算指针读数；
+    仪表识别模式加载 gauge.pt，识别温度/湿度表的 7 个关键点并计算读数；
     红外热像模式通过 mlx90640_ros.thermal_session 显示 MLX90640 热图，支持
     capture.bin 回放、串口连接、楼层标定和快照；
   * 有桌面环境时用 tkinter 做预览窗口（OpenCV 只负责读摄像头和写图片），
@@ -139,7 +139,7 @@ MAX_PREVIEW_H = 720
 MAX_BURST = 99
 MAX_TYPE_LEN = 40
 DEFAULT_MODEL_DIR = Path.home() / "AI视觉"
-DEFAULT_POSE_MODEL = DEFAULT_MODEL_DIR / "Pose.pt"
+DEFAULT_POSE_MODEL = DEFAULT_MODEL_DIR / "gauge.pt"
 MODE_PHOTO = "photo"
 MODE_DETECT = "detect"
 MODE_SCAN = "scan"
@@ -3037,23 +3037,36 @@ class GaugeApp(object):
             draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
 
             points = det.keypoints * scale
-            axis, tip, min_pt, max_pt = points[0], points[1], points[2], points[3]
+            axis, tip = points[0], points[1]
+            tick_indices = list(det.tick_indices) if len(det.tick_indices) >= 2 \
+                else [2, 3]
+            tick_indices = [index for index in tick_indices
+                            if 0 <= index < len(points)]
             draw.line([tuple(axis), tuple(tip)], fill=(240, 60, 60), width=4)
-            draw.line([tuple(axis), tuple(min_pt)], fill=(80, 130, 220), width=1)
-            draw.line([tuple(axis), tuple(max_pt)], fill=(70, 180, 100), width=1)
-            for point, point_color in (
-                    (axis, (255, 255, 255)), (tip, (240, 60, 60)),
-                    (min_pt, (80, 130, 220)), (max_pt, (70, 180, 100))):
+            for order, index in enumerate(tick_indices):
+                point = points[index]
+                color = (70, 180, 100) if order in (0, len(tick_indices) - 1) \
+                    else (80, 130, 220)
+                draw.line([tuple(axis), tuple(point)], fill=color, width=1)
                 px, py = int(round(point[0])), int(round(point[1]))
-                draw.ellipse([px - 5, py - 5, px + 5, py + 5],
-                             fill=point_color, outline=(0, 0, 0))
+                draw.ellipse([px - 4, py - 4, px + 4, py + 4],
+                             fill=color, outline=(0, 0, 0))
+            px, py = int(round(axis[0])), int(round(axis[1]))
+            draw.ellipse([px - 5, py - 5, px + 5, py + 5],
+                         fill=(255, 255, 255), outline=(0, 0, 0))
+            px, py = int(round(tip[0])), int(round(tip[1]))
+            draw.ellipse([px - 5, py - 5, px + 5, py + 5],
+                         fill=(240, 60, 60), outline=(0, 0, 0))
 
             if small is not None and len(readings) == 1:
-                for point, label in ((axis, "轴"), (tip, "尖"),
-                                     (min_pt, "最小"), (max_pt, "最大")):
+                labels = det.labels or tuple(
+                    "kp{}".format(i) for i in range(len(points)))
+                for index, point in enumerate(points):
+                    if index >= len(labels):
+                        break
                     px, py = int(round(point[0])), int(round(point[1]))
-                    draw.text((px + 7, py - 16), label, font=small,
-                              fill=(255, 255, 255))
+                    draw.text((px + 7, py - 16), str(labels[index]),
+                              font=small, fill=(255, 255, 255))
 
             if font is not None:
                 text = self._reading_text(reading)
@@ -6067,21 +6080,21 @@ def parse_args(argv=None):
 
     # ---- 仪表识别（Pose） ----
     parser.add_argument("--pose-model", default=str(DEFAULT_POSE_MODEL),
-                        help="仪表 Pose 权重路径（默认：~/AI视觉/Pose.pt）")
+                        help="仪表 Pose 权重路径（默认：~/AI视觉/gauge.pt）")
     parser.add_argument("--gauge-conf", type=float, default=0.5,
                         help="仪表目标置信度阈值（默认 0.5）")
     parser.add_argument("--gauge-kpt-conf", type=float, default=0.3,
-                        help="4 个关键点的最低置信度（默认 0.3）")
+                        help="关键点的最低置信度（默认 0.3）")
     parser.add_argument("--gauge-arc", choices=("long", "short", "auto"),
                         default="long",
                         help="指针刻度弧：long 长弧（默认，常见表计）/ short / auto")
     parser.add_argument("--gauge-pointer", choices=("radon", "tip"),
                         default="radon",
                         help="指针角度：radon 正视化后用射线搜索（默认）/ tip 模型尖端")
-    parser.add_argument("--gauge-temp-min", type=float, default=0.0,
-                        help="温度量程下限（默认 0）")
-    parser.add_argument("--gauge-temp-max", type=float, default=100.0,
-                        help="温度量程上限（默认 100）")
+    parser.add_argument("--gauge-temp-min", type=float, default=-30.0,
+                        help="温度量程下限（默认 -30）")
+    parser.add_argument("--gauge-temp-max", type=float, default=50.0,
+                        help="温度量程上限（默认 50）")
     parser.add_argument("--gauge-humidity-min", type=float, default=0.0,
                         help="湿度量程下限（默认 0）")
     parser.add_argument("--gauge-humidity-max", type=float, default=100.0,

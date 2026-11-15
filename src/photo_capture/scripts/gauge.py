@@ -2,20 +2,19 @@
 # -*- coding: utf-8 -*-
 """仪表（温度/湿度表）Pose 识别。
 
-模型输出 4 个关键点：
-    0 = 指针旋转轴
-    1 = 指针尖端
-    2 = 量程最小值刻度
-    3 = 量程最大值刻度
-类别：temperature / humidity。
+gauge.pt 输出 7 个关键点：
+    0 = 指针旋转轴（静态）
+    1 = 指针尖端（动态）
+    2 = 量程最小值刻度（静态）
+    3/4/5 = 三个中间刻度（静态）
+    6 = 量程最大值刻度（静态）
+temperature: min -30, scales -10/10/30, max 50
+humidity:    min 0,   scales 20/40/70, max 100
 
-当前 Pose.pt 的 4 个点里只有 3 个是静态的（轴、最小、最大），tip 会随读数动。
-所以配准只用 3 个静态点做仿射 warp 到 512x512 正视空间，tip 不参与 warp；
-在正视空间里用 Radon（tip 作为搜索先验）求指针角度，再投影到最小->最大刻度弧，
-按量程换算读数。每类表第一次识别时自动标定模板，模板保存在输出目录的
-templates/<类别>.json，可按 T 重标。
-
-如果以后模型增加第 5 个静态关键点，可把 4 个静态点换成 homography。
+6 个静态点（轴 + 5 个刻度）做单应 warp 到 512x512 正视空间，tip 不参与 warp；
+正视空间用 Radon（tip 作搜索先验）求指针角度，再按三个中间刻度做分段线性插值。
+每类表第一次识别时自动标定模板，模板保存在输出目录的 templates/<类别>.json，
+可按 T 重标。旧 4 点 Pose.pt 自动退化为 3 点仿射 + 首尾刻度。
 """
 
 import json
@@ -43,8 +42,8 @@ except Exception:  # pragma: no cover - 正常运行时不会发生
 
 @dataclass
 class GaugeSettings:
-    temp_min: float = 0.0
-    temp_max: float = 100.0
+    temp_min: float = -30.0
+    temp_max: float = 50.0
     humidity_min: float = 0.0
     humidity_max: float = 100.0
     kpt_conf: float = 0.3
@@ -78,6 +77,50 @@ class GaugeSettings:
         return 0.0, 100.0, "%"
 
 
+@dataclass(frozen=True)
+class GaugeSpec:
+    class_name: str
+    static_indices: Tuple[int, ...]
+    tick_indices: Tuple[int, ...]
+    tick_values: Tuple[float, ...]
+    labels: Tuple[str, ...]
+    unit: str
+
+
+def gauge_spec_for(class_name: str, n_points: int,
+                   settings: GaugeSettings) -> GaugeSpec:
+    """按模型输出点数/类别给出静态配准点、刻度点和刻度值。"""
+    name = str(class_name).lower()
+    is_temp = "temp" in name or "温度" in name
+    is_humid = "humid" in name or "湿度" in name
+    vmin, vmax, unit = settings.range_for(class_name)
+    if n_points >= 7:
+        static = (0, 2, 3, 4, 5, 6)
+        ticks = (2, 3, 4, 5, 6)
+        if is_humid:
+            values = (vmin, 20.0, 40.0, 70.0, vmax)
+            labels = ("axis", "tip", "min_value", "scale_20", "scale_40",
+                      "scale_70", "max_value")
+        elif is_temp:
+            values = (vmin, -10.0, 10.0, 30.0, vmax)
+            labels = ("axis", "tip", "min_value", "scale_-10", "scale_10",
+                      "scale_30", "max_value")
+        else:
+            values = (vmin, vmin + (vmax - vmin) * 0.25,
+                      vmin + (vmax - vmin) * 0.5,
+                      vmin + (vmax - vmin) * 0.75, vmax)
+            labels = ("axis", "tip", "min_value", "scale_1", "scale_2",
+                      "scale_3", "max_value")
+        return GaugeSpec(class_name, static, ticks, tuple(float(v) for v in values),
+                         labels, unit)
+    if n_points >= 4:
+        labels = ("axis", "tip", "min_value", "max_value")
+        return GaugeSpec(class_name, (0, 2, 3), (2, 3), (float(vmin), float(vmax)),
+                         labels, unit)
+    return GaugeSpec(class_name, (0, 2, 3), (2, 3), (float(vmin), float(vmax)),
+                     ("axis", "tip", "min_value", "max_value"), unit)
+
+
 @dataclass
 class GaugeDetection:
     class_id: int
@@ -92,6 +135,11 @@ class GaugeDetection:
     angle_deg: Optional[float] = None
     on_scale: bool = False
     message: str = ""
+    static_indices: Tuple[int, ...] = (0, 2, 3)
+    tick_indices: Tuple[int, ...] = (2, 3)
+    tick_values: Tuple[float, ...] = (0.0, 100.0)
+    labels: Tuple[str, ...] = ()
+    n_keypoints: int = 4
 
 
 def _wrap(angle: float) -> float:
@@ -154,11 +202,112 @@ def compute_fraction(axis, tip, min_point, max_point, arc: str = "long"):
             direction, math.degrees(sweep), message)
 
 
+def compute_value_from_ticks(axis, pointer, tick_points, tick_values,
+                             arc: str = "long"):
+    """用多个已知刻度点插值读数。
+
+    比只用 min/max 更准：温度表用 -10/10/30 三个中间刻度，湿度表用 20/40/70，
+    指针落在哪两个刻度之间就按这两个刻度线性插值。
+
+    返回 (value 或 None, 归一化比例或 None, 是否在刻度内, 指针角度°, 提示)。
+    """
+    axis = np.asarray(axis, dtype=float).reshape(2)
+    pointer = np.asarray(pointer, dtype=float).reshape(2)
+    points = np.asarray(tick_points, dtype=float)
+    values = [float(v) for v in tick_values]
+    if points.ndim != 2 or points.shape[1] != 2 or len(points) != len(values):
+        return None, None, False, None, "刻度点数量不匹配"
+    if len(points) < 2:
+        return None, None, False, None, "刻度点不足"
+    if any(values[i] > values[i + 1] for i in range(len(values) - 1)):
+        return None, None, False, None, "刻度值顺序错误"
+    if np.linalg.norm(points[0] - axis) < 1.0 or np.linalg.norm(points[-1] - axis) < 1.0:
+        return None, None, False, None, "最小/最大刻度离旋转轴太近"
+    if np.linalg.norm(pointer - axis) < 1.0:
+        return None, None, False, None, "指针尖端离旋转轴太近"
+
+    a_min = math.atan2(points[0][1] - axis[1], points[0][0] - axis[0])
+    a_max = math.atan2(points[-1][1] - axis[1], points[-1][0] - axis[0])
+    a_tip = math.atan2(pointer[1] - axis[1], pointer[0] - axis[0])
+    short = _wrap(a_max - a_min)
+    if abs(short) < math.radians(5.0):
+        return None, None, False, math.degrees(a_tip) % 360.0, "最小和最大刻度几乎重合"
+    short_dir = 1 if short >= 0 else -1
+    short_sweep = abs(short)
+    long_dir = -short_dir
+    long_sweep = 2.0 * math.pi - short_sweep
+
+    def fraction_for(point, direction, sweep):
+        angle = math.atan2(point[1] - axis[1], point[0] - axis[0])
+        if direction > 0:
+            delta = (angle - a_min) % (2.0 * math.pi)
+        else:
+            delta = (a_min - angle) % (2.0 * math.pi)
+        return delta / sweep if sweep > 1e-9 else 0.0
+
+    def evaluate(direction, sweep):
+        fracs = [fraction_for(point, direction, sweep) for point in points]
+        pointer_frac = fraction_for(pointer, direction, sweep)
+        monotonic = all(fracs[i] <= fracs[i + 1] + 0.02
+                        for i in range(len(fracs) - 1))
+        inside = all(-0.05 <= frac <= 1.05 for frac in fracs)
+        valid = monotonic and inside and -0.02 <= pointer_frac <= 1.02
+        return fracs, pointer_frac, monotonic, valid
+
+    long_fracs, long_pointer, long_mono, long_valid = evaluate(long_dir, long_sweep)
+    short_fracs, short_pointer, short_mono, short_valid = evaluate(short_dir, short_sweep)
+    if arc == "short":
+        fracs, pointer_frac, monotonic, valid = (
+            short_fracs, short_pointer, short_mono, short_valid)
+    elif arc == "auto" and not long_valid and short_valid:
+        fracs, pointer_frac, monotonic, valid = (
+            short_fracs, short_pointer, short_mono, short_valid)
+    else:
+        fracs, pointer_frac, monotonic, valid = (
+            long_fracs, long_pointer, long_mono, long_valid)
+
+    angle_deg = math.degrees(a_tip) % 360.0
+    if not monotonic or not valid:
+        # 刻度顺序异常时退回首尾刻度，至少给出一个近似值
+        if arc == "short":
+            direction, sweep = short_dir, short_sweep
+        else:
+            direction, sweep = long_dir, long_sweep
+        p_frac = fraction_for(pointer, direction, sweep)
+        if -0.02 <= p_frac <= 1.02:
+            p_frac = max(0.0, min(1.0, p_frac))
+            value = values[0] + p_frac * (values[-1] - values[0])
+            norm = (value - values[0]) / (values[-1] - values[0])                 if values[-1] != values[0] else 0.0
+            return value, norm, True, angle_deg, "刻度点顺序异常，按首尾刻度估算"
+        return None, None, False, angle_deg, "指针不在刻度弧上"
+
+    if pointer_frac < fracs[0] - 0.02 or pointer_frac > fracs[-1] + 0.02:
+        message = "指针不在刻度弧上"
+        return None, None, False, angle_deg, message
+    pointer_frac = max(0.0, min(1.0, pointer_frac))
+    value = None
+    for index in range(len(fracs) - 1):
+        left, right = fracs[index], fracs[index + 1]
+        if right - left < 1e-9:
+            continue
+        if left - 1e-9 <= pointer_frac <= right + 1e-9:
+            ratio = (pointer_frac - left) / (right - left)
+            value = values[index] + ratio * (values[index + 1] - values[index])
+            break
+    if value is None:
+        return None, None, False, angle_deg, "指针不在刻度区间内"
+    norm = (value - values[0]) / (values[-1] - values[0])         if values[-1] != values[0] else 0.0
+    return value, max(0.0, min(1.0, norm)), True, angle_deg, ""
+
+
 def keypoint_radius(points) -> float:
-    """4 个关键点到旋转轴的最小距离；用来排除挤成一团的误检。"""
-    points = np.asarray(points, dtype=float).reshape(4, 2)
+    """所有关键点到旋转轴的最小距离；用来排除挤成一团的误检。"""
+    points = np.asarray(points, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 2 or len(points) < 2:
+        return 0.0
     axis = points[0]
-    return float(min(np.linalg.norm(points[i] - axis) for i in (1, 2, 3)))
+    return float(min(np.linalg.norm(points[i] - axis)
+                     for i in range(1, len(points))))
 
 
 def reading_text(item) -> str:
@@ -208,7 +357,7 @@ class PoseDetector:
             raise ModelError("姿态模型加载失败：{}".format(error))
         if getattr(self.model, "task", "") != "pose":
             raise ModelError(
-                "所选模型不是 pose 模型（task={}）。\n请选择 Pose.pt 这类姿态权重。".format(
+                "所选模型不是 pose 模型（task={}）。\n请选择 gauge.pt 这类姿态权重。".format(
                     getattr(self.model, "task", "?")))
         raw_names = getattr(self.model, "names", {}) or {}
         self.names: Dict[int, str] = (
@@ -298,14 +447,20 @@ class PoseDetector:
         detections = []
         for index in range(min(len(keypoints), len(confs))):
             points = np.asarray(keypoints[index], dtype=float)
-            if points.shape != (4, 2):
+            if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] < 4:
                 continue
+            n_points = points.shape[0]
             if keypoint_conf is not None and index < len(keypoint_conf):
                 kconf = np.asarray(keypoint_conf[index], dtype=float).reshape(-1)
+                if len(kconf) < n_points:
+                    kconf = np.pad(kconf, (0, n_points - len(kconf)),
+                                   constant_values=0.0)
+                kconf = kconf[:n_points]
             else:
-                kconf = np.ones(4, dtype=float)
+                kconf = np.ones(n_points, dtype=float)
             class_id = int(classes[index])
             class_name = self.names.get(class_id, str(class_id))
+            spec = gauge_spec_for(class_name, n_points, self.settings)
             box = (float(xyxy[index][0]), float(xyxy[index][1]),
                    float(xyxy[index][2]), float(xyxy[index][3]))
             box_min = min(max(1.0, box[2] - box[0]), max(1.0, box[3] - box[1]))
@@ -313,22 +468,22 @@ class PoseDetector:
             low_conf = float(kconf.min()) < self.settings.kpt_conf
             if low_conf:
                 fraction = None
+                value = None
                 on_scale = False
                 angle_deg = None
                 message = "关键点置信度低"
             elif radius < max(12.0, 0.10 * box_min):
                 fraction = None
+                value = None
                 on_scale = False
                 angle_deg = None
                 message = "关键点过于集中，可能不是仪表"
             else:
-                fraction, on_scale, angle_deg, _amin, _amax, _dir, _sweep, message = \
-                    compute_fraction(points[0], points[1], points[2], points[3],
-                                     self.settings.arc)
-            vmin, vmax, unit = self.settings.range_for(class_name)
-            value = None
-            if fraction is not None and on_scale:
-                value = vmin + max(0.0, min(1.0, fraction)) * (vmax - vmin)
+                tick_points = points[list(spec.tick_indices)]
+                value, fraction, on_scale, angle_deg, message = \
+                    compute_value_from_ticks(
+                        points[0], points[1], tick_points,
+                        spec.tick_values, self.settings.arc)
             detections.append(GaugeDetection(
                 class_id=class_id,
                 class_name=class_name,
@@ -338,13 +493,17 @@ class PoseDetector:
                 keypoint_conf=kconf,
                 fraction=fraction,
                 value=value,
-                unit=unit,
+                unit=spec.unit,
                 angle_deg=angle_deg,
                 on_scale=on_scale,
                 message=message,
+                static_indices=spec.static_indices,
+                tick_indices=spec.tick_indices,
+                tick_values=spec.tick_values,
+                labels=spec.labels,
+                n_keypoints=n_points,
             ))
         return detections
-
 
 def _safe_name(text) -> str:
     text = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(text)).strip(" .")
@@ -354,30 +513,65 @@ def _safe_name(text) -> str:
 @dataclass
 class GaugeTemplate:
     class_name: str
-    axis: np.ndarray
-    min_point: np.ndarray
-    max_point: np.ndarray
+    static_indices: Tuple[int, ...]
+    tick_indices: Tuple[int, ...]
+    tick_values: Tuple[float, ...]
+    static_points: np.ndarray
     radius: float = 190.0
     created_at: str = ""
+
+    @property
+    def axis(self) -> np.ndarray:
+        return self.static_points[self.static_indices.index(0)]
+
+    @property
+    def tick_points(self) -> np.ndarray:
+        positions = [self.static_indices.index(index) for index in self.tick_indices]
+        return self.static_points[positions]
+
+    @property
+    def min_point(self) -> np.ndarray:
+        return self.tick_points[0]
+
+    @property
+    def max_point(self) -> np.ndarray:
+        return self.tick_points[-1]
 
     def to_dict(self):
         return {
             "class_name": self.class_name,
-            "axis": [round(float(v), 3) for v in self.axis],
-            "min_point": [round(float(v), 3) for v in self.min_point],
-            "max_point": [round(float(v), 3) for v in self.max_point],
+            "static_indices": [int(v) for v in self.static_indices],
+            "tick_indices": [int(v) for v in self.tick_indices],
+            "tick_values": [float(v) for v in self.tick_values],
+            "static_points": [[round(float(x), 3), round(float(y), 3)]
+                              for x, y in self.static_points],
             "radius": float(self.radius),
             "created_at": self.created_at or datetime.now().isoformat(timespec="seconds"),
         }
 
     @classmethod
     def from_dict(cls, data):
+        if "static_points" in data:
+            static_points = np.asarray(data["static_points"], dtype=float)
+            static_indices = tuple(int(v) for v in data["static_indices"])
+            tick_indices = tuple(int(v) for v in data["tick_indices"])
+            tick_values = tuple(float(v) for v in data["tick_values"])
+            if static_points.ndim != 2 or static_points.shape[1] != 2:
+                raise ValueError("模板点格式错误")
+            if len(static_points) != len(static_indices):
+                raise ValueError("模板点数量不匹配")
+            return cls(str(data.get("class_name", "gauge")), static_indices,
+                       tick_indices, tick_values, static_points,
+                       float(data.get("radius", 190.0)),
+                       str(data.get("created_at", "")))
+        # 兼容旧版三点模板
         axis = np.asarray(data["axis"], dtype=float)
         min_point = np.asarray(data["min_point"], dtype=float)
         max_point = np.asarray(data["max_point"], dtype=float)
         if axis.shape != (2,) or min_point.shape != (2,) or max_point.shape != (2,):
             raise ValueError("模板点格式错误")
-        return cls(str(data.get("class_name", "gauge")), axis, min_point, max_point,
+        return cls(str(data.get("class_name", "gauge")), (0, 2, 3), (2, 3),
+                   (0.0, 100.0), np.stack([axis, min_point, max_point]),
                    float(data.get("radius", 190.0)),
                    str(data.get("created_at", "")))
 
@@ -488,7 +682,7 @@ def estimate_pointer_angle(warped, center=(256.0, 256.0),
 
 
 class GaugeRectifier:
-    """用 3 个静态点（轴、最小、最大）做仿射正视化，tip 只参与指针角度。"""
+    """用静态关键点做正视化：4 个以上用单应，3 个用仿射；tip 不参与 warp。"""
 
     SIZE = 512
     CENTER = np.array([256.0, 256.0], dtype=float)
@@ -501,21 +695,30 @@ class GaugeRectifier:
 
     def _calibrate(self, detection: GaugeDetection) -> GaugeTemplate:
         axis = np.asarray(detection.keypoints[0], dtype=float)
-        min_point = np.asarray(detection.keypoints[2], dtype=float)
-        max_point = np.asarray(detection.keypoints[3], dtype=float)
+        static_indices = tuple(int(v) for v in detection.static_indices)
+        tick_indices = tuple(int(v) for v in detection.tick_indices)
+        tick_values = tuple(float(v) for v in detection.tick_values)
+        if 0 not in static_indices or len(static_indices) < 3:
+            raise ValueError("静态关键点不足，无法标定模板")
+        if len(tick_indices) < 2:
+            raise ValueError("刻度关键点不足")
         box = detection.box
         box_min = min(max(1.0, box[2] - box[0]), max(1.0, box[3] - box[1]))
         if keypoint_radius(detection.keypoints) < max(12.0, 0.10 * box_min):
             raise ValueError("关键点过于集中，无法标定模板")
-        min_angle = _unit_angle(axis, min_point)
-        max_angle = _unit_angle(axis, max_point)
-        if abs(_wrap(max_angle - min_angle)) < math.radians(5.0):
-            raise ValueError("最小/最大刻度角度过小，无法标定模板")
+        static_points = []
+        for index in static_indices:
+            if index == 0:
+                static_points.append(self.CENTER.copy())
+            else:
+                angle = _unit_angle(axis, detection.keypoints[index])
+                static_points.append(_template_point(self.CENTER, self.RADIUS, angle))
         template = GaugeTemplate(
             class_name=detection.class_name,
-            axis=self.CENTER.copy(),
-            min_point=_template_point(self.CENTER, self.RADIUS, min_angle),
-            max_point=_template_point(self.CENTER, self.RADIUS, max_angle),
+            static_indices=static_indices,
+            tick_indices=tick_indices,
+            tick_values=tick_values,
+            static_points=np.asarray(static_points, dtype=float),
             radius=self.RADIUS,
             created_at=datetime.now().isoformat(timespec="seconds"),
         )
@@ -546,7 +749,9 @@ class GaugeRectifier:
         return count
 
     def rectify(self, frame, detection: GaugeDetection) -> Optional[GaugeReading]:
-        if detection.keypoints.shape != (4, 2):
+        if detection.keypoints.ndim != 2 or detection.keypoints.shape[1] != 2:
+            return None
+        if len(detection.keypoints) != len(detection.keypoint_conf):
             return None
         if float(detection.keypoint_conf.min()) < self.settings.kpt_conf:
             return None
@@ -557,26 +762,47 @@ class GaugeRectifier:
         )
         if detection.message and any(
                 detection.message.startswith(prefix) for prefix in invalid_prefixes):
-            # 关键点/几何无效，不用它标定或读数；刻度弧外仍允许正视化后重算
             return None
         try:
             template = self.template_for(detection)
         except Exception as error:
             self.last_message = str(error)
             return None
-        src = np.float32([
-            detection.keypoints[0], detection.keypoints[2], detection.keypoints[3]])
-        dst = np.float32([
-            template.axis, template.min_point, template.max_point])
+        static_indices = list(template.static_indices)
+        if 0 not in static_indices or len(static_indices) < 3:
+            return None
+        src = np.float32(detection.keypoints[static_indices])
+        dst = np.float32(template.static_points)
+        matrix = None
+        warped = None
+        tip = None
         try:
-            matrix = cv2.getAffineTransform(src, dst)
-            warped = cv2.warpAffine(
-                frame, matrix, (self.SIZE, self.SIZE),
-                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-            tip = cv2.transform(
-                np.array([[detection.keypoints[1]]], dtype=np.float32),
-                matrix)[0][0]
-        except cv2.error:
+            if len(static_indices) >= 4:
+                matrix, _mask = cv2.findHomography(src, dst, 0)
+                if matrix is not None:
+                    warped = cv2.warpPerspective(
+                        frame, matrix, (self.SIZE, self.SIZE),
+                        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+                    tip = cv2.perspectiveTransform(
+                        np.array([[detection.keypoints[1]]], dtype=np.float32),
+                        matrix)[0][0]
+            if matrix is None:
+                # 三点仿射兜底（旧 4 点模型或单应退化）
+                axis_pos = static_indices.index(0)
+                min_pos = static_indices.index(detection.tick_indices[0])
+                max_pos = static_indices.index(detection.tick_indices[-1])
+                src3 = np.float32([src[axis_pos], src[min_pos], src[max_pos]])
+                dst3 = np.float32([dst[axis_pos], dst[min_pos], dst[max_pos]])
+                matrix = cv2.getAffineTransform(src3, dst3)
+                warped = cv2.warpAffine(
+                    frame, matrix, (self.SIZE, self.SIZE),
+                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+                tip = cv2.transform(
+                    np.array([[detection.keypoints[1]]], dtype=np.float32),
+                    matrix)[0][0]
+        except (cv2.error, ValueError):
+            return None
+        if warped is None or tip is None:
             return None
         axis = template.axis
         prior = math.atan2(tip[1] - axis[1], tip[0] - axis[0])
@@ -585,13 +811,15 @@ class GaugeRectifier:
             angle, _score = estimate_pointer_angle(
                 warped, tuple(axis), prior, template.radius)
         tip_point = _template_point(axis, template.radius, angle)
-        fraction, on_scale, angle_deg, _amin, _amax, _dir, _sweep, message = \
-            compute_fraction(axis, tip_point, template.min_point,
-                             template.max_point, self.settings.arc)
-        vmin, vmax, unit = self.settings.range_for(detection.class_name)
-        value = None
-        if fraction is not None and on_scale:
-            value = vmin + max(0.0, min(1.0, fraction)) * (vmax - vmin)
+        tick_values = template.tick_values
+        if len(detection.tick_values) == len(template.tick_indices):
+            # 量程/中间刻度以当前模型配置为准，模板只提供几何
+            tick_values = detection.tick_values
+        value, fraction, on_scale, angle_deg, message = \
+            compute_value_from_ticks(
+                axis, tip_point, template.tick_points,
+                tick_values, self.settings.arc)
+        unit = detection.unit or self.settings.range_for(detection.class_name)[2]
         return GaugeReading(
             detection=detection,
             warped=warped,

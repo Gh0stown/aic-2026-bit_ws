@@ -260,7 +260,7 @@ class LayoutTests(unittest.TestCase):
         dialogs.append(gauge)
         self.assertEqual(gauge._arc(), 'long')
         self.assertEqual(gauge._pointer(), 'radon')
-        self.assertEqual(gauge.temp_max_var.get(), '100.0')
+        self.assertEqual(gauge.temp_max_var.get(), '50.0')
         for dialog in dialogs:
             self.root.update()
             self.assertLess(dialog.winfo_height(), 820)
