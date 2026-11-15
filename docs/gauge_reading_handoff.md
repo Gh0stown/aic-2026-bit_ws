@@ -1,35 +1,35 @@
 # 仪表识别：决策、派工与审核交接
 
-> 建立日期：2026-11-15（Asia/Shanghai）｜文档版本：v9（G1b0-R2审核通过）
-> 当前阶段：**G1b0-R2通过（A08）；候选仅作为离线开发参考。发布第5.6节G1b1指定ROI单帧验证；自动全图找表、G2–G4均未发布，不得接车。**
-> 当前结论：仅数学与表结构校验通过；**没有正式标定，没有图像识别精度/性能验收，没有实机放行。**
+> 建立日期：2026-11-15（Asia/Shanghai）｜文档版本：v11（Flash两轮修复，Lead独立复审完成）
+> 当前阶段：**G1b1指定ROI离线开发验证限定通过（A10），真实底图合成错误候选24→0；0/100端点与低分辨率局限未解决。G1实拍未验收，G2–G4未发布，不得接车。**
+> 当前结论：数学、标定工具及指定ROI单帧离线开发链路已复核；**没有独立实拍精度/现场性能验收，没有生产正式标定或实机放行。**
 > 本文件是决策与任务状态的唯一台账；代码、数据和长日志通过链接引用，不在两个对话中重复粘贴。
 
-## 0. 给另一个 DeepSeek 对话的启动指令
+## 0. 本会话内派工入口（用户已批准Workflow方式）
 
-将下面这段直接发给负责实现的 DS：
+用户不再需要把指令搬到另一对话；由本会话Lead派Flash执行并独立审核。以下保留为任务边界摘要，不代表又创建了第二个并行实现者：
 
 ```text
 请先读取仓库根目录 AGENTS.md 和 docs/gauge_reading_handoff.md。
-你是实现方；先读审核区A08和第5.6节。G1b0-R2已通过，不再返工标定工具。
-本轮只做G1b1：显式指定湿度ROI的离线单帧检测，不做自动全图找表、多帧、GUI或接车。
-使用A08绑定的候选表作为显式开发参考，不把候选改成默认正式calib，不按文件名硬编码轴心/指针。
-只新增dial_reading.py及test_dial_reading.py并追加回报；已通过文件和旧YOLO保持原样。
-必须输出原图对应叠图与角度/峰竞争/覆盖率诊断；单帧候选值不得作为最终可信读数。
-完成G1b1-R1审核包后停下，不安装依赖，不commit/push，不自行解锁下一阶段。
+当前先读A10：Flash-R3修复已由Lead独立复审，停止本轮写入，保留可review补丁与复核产物。
+协作继续由本会话Lead显式派Flash，不再要求用户搬运另一对话的消息；没有常驻运行中的代理任务。
+本轮只支持显式湿度ROI、单帧诊断，value始终null；合成通过不能当作实拍/比赛精度。
+下一步先补清晰小车相机原帧，确认真实湿度环像素与可见性，再由Lead发布G2或采集专项；不擅自调用相机。
+0/100端点拒识仍保留，不夹紧出值；旧约119px整表帧仍无法检出湿度环，不靠多帧投票伪造读数。
+提交推送需用户单独同意；G2–G4未发布，不接车、不改旧YOLO/导航。
 ```
 
-两个对话**不会自动同步消息**。同一工作区以磁盘上的本文为准；用户在我这里说“审核 G0”即可触发审核。若不共享文件系统，用户需传递最新版本文，以及所引用的补丁、数据清单和证据。不存在后台自动派工、自动审查或定时执行。
+当前采用**本会话Lead + 显式指定Flash的Workflow**，不再要求用户手动搬运两个对话的消息；实际任务/回报/审核仍记录在本文。内置团队工具可通信，但当前spawn_teammate接口不能指定provider/model，实测执行模型为gpt-6.1-sol，故该队友已暂停且未进行代码工作。用户已明确选择改用Workflow，调用固定`provider=deepseek-official`、`model=deepseek-flash`（DeepSeek V4.1 Flash），不静默换模型。共享工作区不等于文件锁；Lead独占本文，Flash仅写已批准的代码/测试范围。没有定时后台接车或自动提交。
 
 ## 1. 角色、权限与更新规则
 
 | 角色 | 负责 | 不得代做 |
 |---|---|---|
 | 决策/审核方（本对话） | 方案取舍、发布任务、审查补丁和证据、签发实机测试许可 | 不替 DS 承担常规实现；不把推测当验收 |
-| 实现方（另一 DS 对话） | 执行已发布任务、实现和自测、整理证据、更新回报 | 不自行扩范围、不自行审核通过、不越级接车 |
+| 实现方（本会话Workflow中的Flash） | 执行已发布任务、实现和自测、返回紧凑证据；Lead转录台账 | 不自行扩范围、不写Lead拥有的文档、不自行审核通过或接车 |
 | 用户 | 提供缺失材料、执行实机测试、决定提交和上传 | 无需搬运整段日志或反复解释任务背景 |
 
-- 决策方维护第 3–6 节及审核区；DS 维护自己的回报、证据链接，以及已发布任务的执行状态；实机区由用户提供事实后记录。
+- 决策方维护本文全部状态/派工/审核区，并将Flash返回的回报及证据链接追加到DS回报区；Flash不同时写本文，避免共享文件冲突。实机区由用户提供事实后记录。
 - 回报和审核**追加，不覆盖历史结论**。修改已冻结决策时新增决策编号、理由和受影响任务，旧结论注明已替代。
 - 一次只放行一个可审查阶段；已发布不等于已完成，代码能跑不等于识别正确，离线通过不等于实机通过。
 - 按依赖决定“什么时候做”，不虚构工期；只有用户指定日程后才记录日期和时区。
@@ -137,7 +137,7 @@
 | 编号 | 任务 | 当前状态 | 何时开始/何时停 |
 |---|---|---|---|
 | G0 | 输入与证据核查 | **审核通过（G0-R2 / A02）** | 核查阶段结束；不代表算法已实现或有效 |
-| G1 | 独立离线单帧最小实现 | **G1b0通过（A08）；G1b1已发布，尚未回报** | 仅执行第5.6节指定ROI离线单帧验证；G1整体未验收，不接实机 |
+| G1 | 独立离线单帧最小实现 | **G1b1离线开发限定通过（A10）；G1实拍未验收** | 两轮Flash修复已复审；先补清晰小车原帧，G2未解锁，不接实机 |
 | G2 | 多帧、反例与离线评测 | 待发布 | G1 审核通过后另行发布 |
 | G3 | 停稳小车上的实机采集测试 | 待发布 | G2 证据通过、审核方签发明确实机许可后开始 |
 | G4 | CLI/GUI及后续巡航接入 | 待发布 | 实机结果通过后另行冻结接口与修改清单；巡航另设放行点 |
@@ -321,6 +321,8 @@ G1a-R2 已提交（2026-11-15，Asia/Shanghai），状态：**待审核（G1a-R2
 G1b0-R1 已提交（2026-11-15，Asia/Shanghai），状态：**待审核（G1b0-R1）**。仅新增离线候选标定工具、标注、测试与本地复核产物；G1b1/G2–G4 仍未发布，未接车。
 
 G1b0-R2 已提交（2026-11-15，Asia/Shanghai），状态：**待审核（G1b0-R2）**。仅修输出安全、原子写入和零向量拒绝并补故障回归；G1b1/G2–G4 仍未发布，未接车。
+
+G1b1-R1 已提交（2026-11-15，Asia/Shanghai），状态：**待审核（G1b1-R1）**。仅新增指定ROI单帧验证工具/测试与本地复核产物；G2–G4 仍未发布，未接车。
 
 <!-- DS 从此处追加 G0-R1；引用现有文件时使用仓库根相对路径链接。 -->
 
@@ -796,6 +798,85 @@ git diff --check
 # exit 0
 ```
 
+### G1b1-R1 指定 ROI 单帧验证审核包
+
+| 字段 | 内容 |
+|---|---|
+| 任务/回报编号 | G1b1-R1 |
+| 本轮结论 | **待审核**（不是 G1 通过；G2–G4 未发布、未启动） |
+| 版本 | 实际基线 HEAD `33740bda1e346dc4c522f83ad6ee364184c8df5a`；本文基线 SHA-256 `b278b6fca9caab54fb684c9b7271cb0beaff3009619f202c88d4f18ef2b41912`。工具 [dial_reading.py](<src/photo_capture/scripts/dial_reading.py>) SHA-256 `88735b76822584139200882f600cc89f7f5f3aec8b687c00b4d49a62e4ad59ba`；测试 [test_dial_reading.py](<src/photo_capture/tests/test_dial_reading.py>) `e8e7d103d898ef7913e50d9e68507ede482800820745a8cbd44e4e791eb75637`。A08 候选仍 `d7dccc3e…`，源图仍 `be71a511…`，标注/数学内核未变。 |
+| 改动 | 1. 新增 `dial_reading.py`：显式 ROI、候选哈希校验/`--allow-candidate`、环外缘检测、rho=0.94 蓝段、轴心迁移、暗度/覆盖率/峰竞争、单帧诊断与调试叠图。2. 新增 `test_dial_reading.py`：17 项合成/配置/CLI 回归。3. 追加本文/状态。4. 未改旧 YOLO/GUI/ROS/标注/数学内核；未装依赖；未 commit/push。 |
+| 验证 | 参考图 CLI → exit 0；结果为 `frame_status=low_conf`、`reason=axis_roll_inconsistent`（0.507° >0.5°），**参考图检测未完成**，未输出 candidate/out_of_range。`test_dial_reading` → exit 0，**17 tests OK**；`test_dial_calibration` → exit 0，**24 tests OK**；`test_dial_math` → exit 0，**27 tests OK**；`git diff --check` → exit 0；新文件无尾随空白、无 `dial_reading` 的 `.pyc`。 |
+| 数据/标定 | 输入为 A08 候选（`d7dccc3e…`，`--allow-candidate` + SHA 校验）和源图 `be71a511…`；ROI=`430,870,420,390`。仅有候选开发参考，无正式 `calib.json`、无真实湿度真值。 |
+| 证据 | 参考失败叠图：[debug_overlay.png](<.gauge_reading_review/g1b1-reference/debug_overlay.png>)、[frame_result.json](<.gauge_reading_review/g1b1-reference/frame_result.json>)。合成叠图：[成功](<.gauge_reading_review/g1b1-synthetic/debug_success/debug_overlay.png>)、[量程外](<.gauge_reading_review/g1b1-synthetic/debug_out_of_range/debug_overlay.png>)、[蓝段缺失](<.gauge_reading_review/g1b1-synthetic/debug_blue_missing/debug_overlay.png>)、[双针竞争](<.gauge_reading_review/g1b1-synthetic/debug_competition/debug_overlay.png>)。 |
+| 风险 | 参考图因轴心迁移 roll 差 0.507° 被拒识，未达到 `out_of_range` 演示；这是质量拒识，不是识别成功。合成测试不等于实拍；无多帧、无自动全图找表、无相机/ROS、无实机精度/延迟。单帧即使 ok 也只给 `candidate_value`，`value=null`。 |
+| 下一步 | 交审核方复核；**不启动 G2/G3/G4**。 |
+| 需要裁决 | 无新增代码问题；请审核方判断是否接受参考图 `axis_roll_inconsistent` 拒识、以及是否要求调轴心迁移/蓝段测量后再做参考图 `out_of_range` 演示。 |
+
+**参考图实测（失败但可复核）**
+
+| 项 | 结果 |
+|---|---|
+| ROI / 输入 | `[430, 870, 420, 390]`；1279×1706 原图 |
+| 环检测 | 中心 `[648.428, 1056.338]`；长/短半轴 `182.178 / 179.677 px`；残差 RMS `1.428 px`；外缘覆盖 291 bins |
+| 蓝段 | 边界 `165.5° / 226.1°`，run `60.65°`，环心 midpoint `195.8°` |
+| 轴心迁移 | `roll1=359.508°`，`roll2=0.015°`，差 `0.507° > 0.5°` → 拒识；未运行针检测 |
+| 输出 | `frame_status=low_conf`、`status=low_conf`、`reason=axis_roll_inconsistent`、`candidate_value=null`、`value=null` |
+| 结论 | **参考图检测未完成**；失败叠图已保留，未把拒识写成识别成功 |
+
+**合成验证范围**
+
+- 12 个角度/值案例：`302→2`、`320→10`、`330→15`、`340→20`、`360→30`、`380→40`、`400→50`、`420→60`、`440→70`、`460→80`、`480→90`、`498→98`；量程内 `candidate_value` 误差断言 ≤2 %RH。
+- 滚转 `-6°/0°/+6°` × 整表缩放 `300/450/900 px`；外加 `sigma=1.2` 模糊。
+- 反例：无盘、蓝段缺失、蓝段跨 0°、双暗线竞争、多环歧义、ROI 回映、近圆轴交换、配置错误、输出失败。
+- 合成表/指针/颜色均显式为 fixture，不是参考图真值；不计算真实 MAE/成功率。
+
+**实现边界**
+
+- CLI：`python3 src/photo_capture/scripts/dial_reading.py <image> --calib <JSON> --allow-candidate --roi x y w h --debug-dir <新的空目录>`；可选 `--calib-sha256` 供合成测试覆盖默认 A08 哈希，默认即 A08。
+- `estimate_frame(image_bgr, calibration, roi)` 为纯函数，不读写文件、不起线程；CLI 负责读图/配置/落盘。
+- 输出目录必须不存在或为空；写图/JSON 失败非零，失败只清理本次临时/半成品，不覆盖源图或旧成果。
+- 候选值只在 `candidate_value`；顶层 `value=null`；单帧 ok 也只 `status=low_conf`、`reason=multi_frame_required`。
+- 未实现自动全图找表、多帧、GUI、ROS、相机/底盘接入。
+
+**验证命令**
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 src/photo_capture/scripts/dial_reading.py \
+  /home/mowen/.dsh/attachments/v1/objects/be/be71a511ebfe297c18c86feebc8d99cdefe9030e507a82e65f50d2aed8d36f30 \
+  --calib .gauge_calibration_review/r2-final/candidate_calib.json --allow-candidate \
+  --roi 430 870 420 390 --debug-dir .gauge_reading_review/g1b1-reference
+# exit 0；frame_status=low_conf, reason=axis_roll_inconsistent
+
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_reading.py' -v
+# exit 0；Ran 17 tests ... OK
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_calibration.py' -q
+# exit 0；Ran 24 tests ... OK
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_math.py' -q
+# exit 0；Ran 27 tests ... OK
+git diff --check
+# exit 0
+```
+
+### G1b1-Flash-R2 / R3 本会话派工回报（Lead转录摘要）
+
+| 项 | R2：统一角度基准 | R3：修复色相插值 |
+|---|---|---|
+| 执行方式 | Workflow，deepseek-official / deepseek-flash | 同左，用户已明确批准Workflow |
+| 写入范围 | 单帧模块/测试、新本地复核目录；未写本文 | 同左；未改生成/绘针/擦针/参数矩阵 |
+| 单帧测试 | 26项通过 | 28项通过（另保留24标定+27数学） |
+| 参考原图 | 正确out_of_range、针272.7°、value=null | 同左，保持不回归 |
+| 真实底图合成217例 | 181接受/36拒绝，24个错误候选ok | 187接受/30拒绝，0个错误候选ok |
+| 接受案例≤2 %RH | 157/181 | 187/187，最大误差1.914609 %RH |
+| 低分辨率2帧 | 均no_dial | 均no_dial，未放大冒充真实分辨率 |
+
+- R2修复`roll1`环心/轴心基准混用，新增非零偏移手算/滚转/ROI回归；原图roll迭代差0.507°→0.001848°，没有放宽0.5°门槛。调试指针线也经inv(A)映射回原图。
+- R2真实底图合成第一次暴露系统性错误：在scale1.75+blur1.2条件下，H=179/0附近的红像素被HSV标量插值成假蓝段，导致roll约错170°。Lead独立单例诊断确认，随后直接在本会话派R3，不再要求用户搬运回报。
+- R3只把`sample_blue`改为先采BGR条带、再转HSV，其余颜色/覆盖率/峰竞争/roll门槛不变；增加红色跨色相零点负控和真实蓝段跨角度零点正控。原24错误候选消失：18例转正确接受、6个端点转保守拒识；另12个原拒识中间值变正确接受。未靠过滤失败条件改善指标。
+- 最终源文件SHA-256：[dial_reading.py](<src/photo_capture/scripts/dial_reading.py>) `9fa50259d2f3ab07093c369d7d78b6acee64d717754b2a703240ce916f994d66`；[test_dial_reading.py](<src/photo_capture/tests/test_dial_reading.py>) `78a43d3f0f1324d121af4d1018fb960ae8b36298a46e445d11a945836b18bf0c`。没有commit/push，没有相机/ROS/旧YOLO改动。
+- 完整证据：[R2报告](<.gauge_reading_review/g1b1-flash-r2/real-eval/eval_report.json>)、[R3报告](<.gauge_reading_review/g1b1-flash-r3/real-eval/eval_report.json>)、[原图检出叠图](<.gauge_reading_review/g1b1-flash-r3/real-eval/reference/debug_overlay.png>)、[R3原失败条件修复叠图](<.gauge_reading_review/g1b1-flash-r3/real-eval/synthetic/overlay_fixed_roll-06.0_scale1.75_val010.0_blur1.2.png>)。旧报告保留，不覆盖。
+- 限制：216例量程内合成中，0/100端点共36例有29例拒识；另1例原针角本应量程外，总拒识30。10–90及15共180例均在该合成集通过。底图只有一张，擦针重建影响局部文字，上采样不增加真实分辨率，不能当作真实湿度准确率或跨相机验证。两张旧小车图无法检出湿度环；无独立实拍真值，未做真实MAE或现场延迟验收。
+
 ## 8. 审核区（决策方追加）
 
 ### A00：初始化
@@ -933,8 +1014,44 @@ git diff --check
 - **D11**：接受该候选作为显式指定、哈希绑定的**离线开发参考**，不是生产正式标定，也不作为默认配置。发布第5.6节G1b1：先指定湿度ROI验证像素到角度/候选值的链路，暂不解决自动全图找表，最终可信数值留到多帧与实拍验收。不得在算法里写死参考图轴心或绕过拒识。
 - **下一步**：DS重读首页，只实现G1b1并提交R1后停下。本审核方仍只改本文，不代写识别代码；G2–G4未发布，没有实机许可。若用户授权上传，本轮可提交工具、测试、原始标注和本文4个文件；源图及整个本地复核目录均不入库，其他改动不混入。
 
+### A09：本会话接管G1b1-R1，显式派Flash限定修复
+
+- **用户授权与派工方式**：用户要求B1后由本会话直接派DeepSeek V4.1 Flash；实测内置团队能传消息，但spawn_teammate不支持模型选项，创建/执行回执显示gpt-6.1-sol。已中止该队友，仅做过一句通信测试，未授权其代码工作。用户随后明确选择“改用Workflow”，本次固定`provider=deepseek-official, model=deepseek-flash`，不修改插件/全局模型配置。命名团队的未执行任务已撤销，避免两个实现者重叠。
+- **受审版本**：HEAD `33740bda1e346dc4c522f83ad6ee364184c8df5a`；R1新增代码`88735b76822584139200882f600cc89f7f5f3aec8b687c00b4d49a62e4ad59ba`、测试`e8e7d103d898ef7913e50d9e68507ede482800820745a8cbd44e4e791eb75637`，均未提交。Lead独立复跑17项单帧、24项标定、27项数学测试，均exit 0；测试通过不消除参考原图未检出的事实。
+- **P1根因**：[migrate_axis](<src/photo_capture/scripts/dial_reading.py>)把运行时环心蓝段中点减去了参考轴心中点，未按第5.6节使用参考环心中点。候选的两参考中点分别195.78467879°/196.292032°，自带约0.507°差，导致原图被0.5°门槛错误拒绝。Lead在内存中统一基准后，roll1/roll2为0.01532121°/0.01347276°，差0.00184845°，可继续检测272.7°指针、覆盖率1.0；未改文件或放宽阈值。
+- **R2已派范围**：仅写单帧模块/测试；校正初始roll基准、增加非零轴心偏移的手算与滚转回归；修正调试线从归一化方向到原图的反变换；完成参考图空白区out_of_range演示。已通过的标定/数学/旧YOLO及所有输入数据保持原样，本文由Lead独占。
+- **评测缺口**：R1只画干净色环，未满足真实底图去针再绘制；且300/450/900实际来自画布尺寸，并非已测整表直径。Flash须交真实底图复制/去针掩膜/已知角度合成的完整条件清单，明确湿环尺寸与画布尺寸，不冒称实拍真值。所有拒识/错峰均报告，不能只统计成功例；低分辨率原帧只作挑战，不报真实MAE。
+- **执行记录**：Workflow `gauge-flash-g1b1-review-fix`，job `workflow-481b882ce71a4bcd`；完成后由Lead收取结果、独立跑测试并读叠图，再追加最终结论。无自动上传、无G2发布、无实机许可。
+
+### A10：Flash-R3独立复审——指定ROI离线开发验证限定通过
+
+- **受审版本**：HEAD `33740bda1e346dc4c522f83ad6ee364184c8df5a` + 上述两份未提交新文件，SHA按Flash-R3回报绑定。Lead独立确认旧YOLO、标定工具/标注、数学内核指纹不变，本轮只由Flash写单帧代码/测试、Lead写本文；没有用错误模型继续实现。
+- **独立复跑**：28项单帧、24项标定、27项数学回归，共79项全部通过（2.253/0.582/0.048秒，exit 0）。Lead在全新目录单独重跑完整217例，不只读取Flash报告；结果同为187接受/30拒绝/错误候选0，接受例最大误差1.91460859 %RH、最大roll误差0.33652724°。原图仍out_of_range，2张低分辨率帧仍no_dial。
+- **生成规则核验**：对R2/R3的擦针、仿射场景、绘针、完整评测与低分辨率挑战函数逐一比较AST哈希，完全相同；候选/源图不变，case_id 217个条件保持一致。改善来自采样顺序修复，不是换数据、减案例或只筛成功帧。Lead已查看原图叠线与原错误条件修复图，湿度小轴/短针/蓝段位置对应合理。
+- **复核产物**：[独立总报告](<.gauge_reading_review/lead-g1b1-r3-verify/eval_report.json>)、[独立逐案例JSON](<.gauge_reading_review/lead-g1b1-r3-verify/synthetic/synthetic_eval.json>)、[独立原图叠线](<.gauge_reading_review/lead-g1b1-r3-verify/reference/debug_overlay.png>)。精确命令：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_reading.py' -q
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_calibration.py' -q
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/photo_capture/tests -p 'test_dial_math.py' -q
+PYTHONDONTWRITEBYTECODE=1 python3 src/photo_capture/tests/test_dial_reading.py --real-eval --output-dir .gauge_reading_review/lead-g1b1-r3-verify
+# 全部exit 0；复核目录已存在，重跑必须另用新空目录，不能覆盖。
+```
+
+- **验收结论**：本轮两个明确代码缺陷已关闭，G1b1的显式ROI/单帧诊断及给定离线测试限定通过；不是全量程稳健、自动找表或真实湿度精度通过。所有输出的顶层value仍null，不把单帧候选发给巡航。
+- **D12，下一步按信息瓶颈而非代码量排序**：0/100端点仍会拒识，旧小车约119px整表图仍no_dial，增加多帧不能凭空补回看不见的环/针。先补较近距离/较高真实分辨率的小车相机原帧，记录整表及湿度环像素、光照/倾斜、可核读参考，再决定G2范围。此处是材料请求，不是AI开相机或实机运行许可；未发布G2–G4，不能绕过审核跑车。端点拒识不得靠夹紧修掉。
+- **交付与代理状态**：两次Flash Workflow及Lead复核命令均已结束、输出已收集；命名团队队友保持inactive，不存在另一个实现者正在写文件。本轮可review补丁仅涉及单帧模块、测试、本文3文件，需用户明确同意后才提交上传；所有原图/合成图/复核目录留本地，导航等无关改动不混入。
+
 ## 9. 实机记录区（用户提供事实后追加）
 
-尚未放行，尚未测试。
+尚未放行算法实机运行，尚未测试。
 
 后续每次记录：许可编号及版本、设备/表型、场景与真实直径、光照/倾斜、采集序列链接、人工参考、输出与失败、实际延迟、结论和下一步。不能只写“上车正常”。
+
+### 下一次用户材料采集（仅拍原图，不运行新识别/巡航）
+
+- 使用小车实际相机，先保持现有分辨率/对焦/曝光等条件不变，在拍照模式设一次连拍10张。
+- A组：按真实巡检停靠位置和朝向，停稳后拍10张，类型可填“仪表复测_原位”。B组：在确保安全、不改航点/导航参数的前提下，临时调整拍摄距离，尽量让整表占画面宽度约1/3或更多（只是采集目标，非已验收阈值），拍10张，类型“仪表复测_近距”。不要用数字放大或离线缩放充当更多真实像素；无法靠近则如实记录限制，不冒险移动。
+- 同一时段补一张手机近照，让湿度小环刻度和短针可辨，辅助人工核对。若针仍在空白区也保留并说明，不人为拨针来凑真值。
+- 保留原始JPEG，不截图、不先裁切或美化压缩；记录两组各自的距离/角度/光照与实际图像尺寸即可，不要求用户算像素或写标签。
+- 用户告知保存目录或上传原文件后，Lead直接读取、量取湿度环像素并离线验证，再裁决G2；用户不必运行新读数CLI。此次是材料采集，不等于许可识别控制底盘或自动巡航。
