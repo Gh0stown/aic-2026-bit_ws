@@ -7,12 +7,13 @@
   * 一次拍照可以连拍 N 张（N 随时可改），也可以单张拍；
   * 运行中随时可以切换类型，换类型后自动建对应的文件夹；
   * 启动时可以选择「拍照模式」「模型测试模式」「区域扫描模式」「仪表识别模式」
-    或「红外热像模式」；
+    或「红外热像模式」「文字识别模式」；
     模型测试模式会加载 ~/AI视觉 下的 .pt 权重，实时画框显示识别结果；
     区域扫描模式控制麦轮底盘横向平移，逐帧拍摄并拼成横向大图；
     仪表识别模式加载 gauge.pt，识别温度/湿度表的 7 个关键点并计算读数；
     红外热像模式通过 mlx90640_ros.thermal_session 显示 MLX90640 热图，支持
     capture.bin 回放、串口连接、楼层标定和快照；
+    文字识别模式提供 PaddleOCR 中文 OCR 和 HyperLPR3 车牌 OCR；
   * 有桌面环境时用 tkinter 做预览窗口（OpenCV 只负责读摄像头和写图片），
     没有图形界面时自动退化为命令行交互模式。
 
@@ -105,6 +106,14 @@ except Exception:  # pragma: no cover - 取决于运行环境
     FloorTable = None
     THERMAL_AVAILABLE = False
 
+try:  # OCR 引擎模块；缺失时只影响文字识别模式
+    import ocr_engine
+
+    OCR_MODULE_AVAILABLE = True
+except Exception:  # pragma: no cover - 取决于运行环境
+    ocr_engine = None
+    OCR_MODULE_AVAILABLE = False
+
 # find_spec 只查包在不在，不真正 import，启动不会被拖慢
 YOLO_RUNTIME_AVAILABLE = bool(
     YOLO_MODULE_AVAILABLE and yolo_detect.ultralytics_available())
@@ -145,6 +154,7 @@ MODE_DETECT = "detect"
 MODE_SCAN = "scan"
 MODE_GAUGE = "gauge"
 MODE_THERMAL = "thermal"
+MODE_OCR = "ocr"
 
 CJK_FONT_CANDIDATES = (
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -912,7 +922,7 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         ttk.Label(body, text="请选择启动模式", font=self._title_font).pack(anchor="w")
         ttk.Label(
             body,
-            text="拍照采集训练照片；模型测试做实时 YOLO 检测；区域扫描用平移拼图；仪表识别读温度/湿度表；红外热像看 MLX90640 热图。",
+            text="拍照采集训练照片；模型测试做实时 YOLO 检测；区域扫描用平移拼图；仪表识别读温度/湿度表；红外热像看 MLX90640 热图；文字识别做中文/车牌 OCR。",
             wraplength=560, justify="left", foreground="#687b8e",
             font=self._sub_font,
         ).pack(anchor="w", pady=(2, 18))
@@ -988,9 +998,24 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
                 justify="center", foreground="#b00020", width=16,
             ).grid(row=2, column=0, sticky="nsew", padx=(0, 10))
 
+        if OCR_MODULE_AVAILABLE:
+            self.ocr_button = tk.Button(
+                buttons, text="文字识别\n\n中文 / 车牌 OCR",
+                width=14, height=4, justify="center", font=self._button_font,
+                relief="flat", bd=0, cursor="hand2", background="#087f8c",
+                foreground="white", activebackground="#066b77", activeforeground="white",
+                command=lambda: self._choose(MODE_OCR),
+            )
+            self.ocr_button.grid(row=2, column=1, sticky="nsew")
+        else:
+            ttk.Label(
+                buttons, text="文字识别不可用\n（缺少 ocr_engine.py）",
+                justify="center", foreground="#b00020", width=16,
+            ).grid(row=2, column=1, sticky="nsew")
+
         ttk.Label(
             body,
-            text="提示：按数字键 1 / 2 / 3 / 4 / 5 也可以选择，Esc 取消。",
+            text="提示：按数字键 1 / 2 / 3 / 4 / 5 / 6 也可以选择，Esc 取消。",
             foreground="#888888",
             font=self._sub_font,
         ).pack(pady=(16, 0))
@@ -1000,6 +1025,7 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         self.bind("<KeyPress-3>", lambda event: self._choose(MODE_SCAN))
         self.bind("<KeyPress-4>", lambda event: self._choose(MODE_GAUGE))
         self.bind("<KeyPress-5>", lambda event: self._choose(MODE_THERMAL))
+        self.bind("<KeyPress-6>", lambda event: self._choose(MODE_OCR))
         self.bind("<Escape>", lambda event: self._cancel())
         self.protocol("WM_DELETE_WINDOW", self._cancel)
 
@@ -1023,6 +1049,8 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         if mode == MODE_GAUGE and not (GAUGE_MODULE_AVAILABLE and YOLO_RUNTIME_AVAILABLE):
             return
         if mode == MODE_THERMAL and not THERMAL_AVAILABLE:
+            return
+        if mode == MODE_OCR and not OCR_MODULE_AVAILABLE:
             return
         self.result = mode
         self.destroy()
@@ -2661,8 +2689,8 @@ class GaugeSettingsDialog(tk.Toplevel if TK_AVAILABLE else object):
             "long": "长弧（常见表计）", "short": "短弧", "auto": "自动",
         }.get(getattr(defaults, "arc", "long"), "长弧（常见表计）"))
         self.pointer_var = tk.StringVar(value={
-            "radon": "Radon（推荐）", "tip": "模型尖端",
-        }.get(getattr(defaults, "pointer", "radon"), "Radon（推荐）"))
+            "tip": "模型尖端", "radon": "Radon",
+        }.get(getattr(defaults, "pointer", "tip"), "模型尖端"))
         self.error_var = tk.StringVar(value="")
 
         body = _dialog_body(self, self.title(), padding=(20, 12))
@@ -2704,7 +2732,7 @@ class GaugeSettingsDialog(tk.Toplevel if TK_AVAILABLE else object):
         ttk.Label(body, text="指针角度：").grid(row=row, column=0, sticky="w", pady=3)
         self.pointer_combo = ttk.Combobox(
             body, textvariable=self.pointer_var, width=16, state="readonly",
-            values=("Radon（推荐）", "模型尖端"))
+            values=("模型尖端", "Radon"))
         self.pointer_combo.grid(row=row, column=1, columnspan=3, sticky="w")
         row += 1
         ttk.Label(body, text="提示：长弧适合大多数圆形温度/湿度表；拿不准时先用长弧。",
@@ -2739,8 +2767,8 @@ class GaugeSettingsDialog(tk.Toplevel if TK_AVAILABLE else object):
             self.arc_var.get(), "long")
 
     def _pointer(self) -> str:
-        return {"Radon（推荐）": "radon", "模型尖端": "tip"}.get(
-            self.pointer_var.get(), "radon")
+        return {"模型尖端": "tip", "Radon": "radon"}.get(
+            self.pointer_var.get(), "tip")
 
     def _ok(self) -> None:
         try:
@@ -2838,7 +2866,7 @@ class GaugeApp(object):
         primary, content = _workspace(
             self, "仪表识别", "GAUGE READER",
             "M 更换模型  ·  S 保存帧  ·  R 保存读数\n"
-            "T 重新标定  ·  V 正视化  ·  Esc 退出；输入框内不抢快捷键。")
+            "T 重载模板  ·  V 正视化  ·  Esc 退出；输入框内不抢快捷键。")
         _action(primary, "保存读数 (R)", self.save_readings, primary=True)
         _action(primary, "保存当前帧 (S)", self.save_snapshot)
         stats = _section(content, "实时信息")
@@ -2846,7 +2874,7 @@ class GaugeApp(object):
         ttk.Label(stats, textvariable=self.det_var).pack(anchor="w", pady=(3, 0))
         tools = _section(content, "标定与查看")
         _action(tools, "正视化 (V)", self.show_rectified)
-        _action(tools, "重新标定 (T)", self.recalibrate)
+        _action(tools, "重载模板 (T)", self.recalibrate)
         _action(tools, "打开记录目录", self.open_folder)
         settings = _section(content, "模型设置")
         ttk.Label(settings, textvariable=self.model_var, font=self._bold_font,
@@ -3219,16 +3247,16 @@ class GaugeApp(object):
     def recalibrate(self) -> None:
         latest = self.detector.latest()
         if latest is None or not latest[1]:
-            self._set_status("当前没有可标定的仪表检测", error=True)
+            self._set_status("当前没有可重载模板的仪表检测", error=True)
             return
         count = self.rectifier.recalibrate(latest[1])
         if count <= 0:
-            self._set_status("重新标定失败：关键点无效", error=True)
+            self._set_status("加载固定模板失败：关键点无效", error=True)
             return
         self._readings = []
         self._readings_frame_id = -1
         self._last_template_message = ""
-        self._set_status("已重新标定 {} 类模板（只用了静态关键点）".format(count))
+        self._set_status("已加载 {} 类固定模板（不需要正对）".format(count))
 
     def show_rectified(self) -> None:
         if not self._readings:
@@ -4775,6 +4803,330 @@ class ThermalApp(object):
 # 图形界面启动流程
 # ---------------------------------------------------------------------------
 
+class OcrApp(object):
+    """文字识别：PaddleOCR 中文 + HyperLPR3 车牌，共用一个 OCR 分区。"""
+
+    def __init__(self, root, camera, output_root):
+        self.root = root
+        self.camera = camera
+        self.output_root = Path(output_root)
+        self.ocr_dir = self.output_root / "OCR"
+        self._closed = False
+        self._after_id = None
+        self._frame = None
+        self._annotated = None
+        self._show_result = False
+        self._busy = False
+        self._dialog_open = False
+        self._queue = queue.Queue()
+        self._last_result = None
+        self._cn = ocr_engine.ChineseOcr()
+        self._plate = ocr_engine.PlateOcr()
+        self._buttons = []
+        self._bold_font = tkfont.Font(root=root, size=12, weight="bold")
+        self.status_var = tk.StringVar(value="就绪：按空格识别当前画面")
+        self.det_model_var = tk.StringVar(value="")
+        self.det_model_display = tk.StringVar(value="未选择：整图 OCR")
+        self.plate_mode_var = tk.StringVar(value="generic")
+        self._build_ui()
+        self._bind_keys()
+        self.root.title("文字识别 - OCR")
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.minsize(760, 560)
+        self._tick()
+
+    def _build_ui(self) -> None:
+        primary, content = _workspace(
+            self, "文字识别", "OCR",
+            "空格 识别当前画面  ·  Esc 退出\n"
+            "中文：PaddleOCR；车牌：HyperLPR3。"
+            "首次识别会在后台加载模型，请稍候。")
+        ttk.Label(primary, text="相机：{}".format(
+            parse_camera_source(self.camera.source)),
+            style="Capture.Muted.TLabel", wraplength=225).pack(
+            anchor="w", pady=(0, 8))
+        self.recognize_button = _action(
+            primary, "识别当前画面 (Space)", self.recognize_current,
+            primary=True)
+        self._buttons.append(self.recognize_button)
+        self.resume_button = _action(
+            primary, "恢复实时预览", self.resume_preview)
+        self.save_button = _action(
+            primary, "保存当前结果", self.save_result, state="disabled")
+
+        ttk.Label(primary, text="识别类型", style="Capture.Section.TLabel").pack(
+            anchor="w", pady=(6, 4))
+        self.notebook = ttk.Notebook(content)
+        self.notebook.pack(fill="both", expand=True)
+
+        chinese_tab = ttk.Frame(self.notebook, padding=6)
+        self.notebook.add(chinese_tab, text="中文文字")
+        ttk.Label(
+            chinese_tab,
+            text="PaddleOCR 中文/英文；可先用 YOLO 裁出楼宇/区域再 OCR。",
+            style="Capture.Muted.TLabel", wraplength=225, justify="left").pack(
+            anchor="w", pady=(0, 5))
+        ttk.Label(
+            chinese_tab, text="楼宇轮廓 YOLO（可选）",
+            style="Capture.Section.TLabel").pack(anchor="w", pady=(2, 2))
+        ttk.Label(
+            chinese_tab, textvariable=self.det_model_display,
+            style="Capture.Muted.TLabel", wraplength=225, justify="left").pack(
+            anchor="w", pady=(0, 3))
+        choose_button = _action(
+            chinese_tab, "选择裁剪模型…", self.choose_detector)
+        self._buttons.append(choose_button)
+        clear_button = _action(
+            chinese_tab, "清除裁剪模型", self.clear_detector)
+        self._buttons.append(clear_button)
+        cn_button = _action(
+            chinese_tab, "识别中文文字", lambda: self.start_ocr("chinese"))
+        self._buttons.append(cn_button)
+        self.cn_text = tk.Text(
+            chinese_tab, height=11, wrap="word", relief="flat",
+            background="#f4f8fb", foreground="#203247", state="disabled")
+        self.cn_text.pack(fill="both", expand=True, pady=(4, 0))
+
+        plate_tab = ttk.Frame(self.notebook, padding=6)
+        self.notebook.add(plate_tab, text="车牌识别")
+        ttk.Label(
+            plate_tab,
+            text="沙盘车牌首字不一定是省份，建议用通用 OCR；真实车牌选 HyperLPR3。",
+            style="Capture.Muted.TLabel", wraplength=225, justify="left").pack(
+            anchor="w", pady=(0, 5))
+        ttk.Radiobutton(
+            plate_tab, text="沙盘/非标（通用 OCR）", value="generic",
+            variable=self.plate_mode_var).pack(anchor="w", pady=(2, 0))
+        ttk.Radiobutton(
+            plate_tab, text="真实车牌（HyperLPR3）", value="hyperlpr",
+            variable=self.plate_mode_var).pack(anchor="w", pady=(0, 5))
+        plate_button = _action(
+            plate_tab, "识别车牌", lambda: self.start_ocr("plate"))
+        self._buttons.append(plate_button)
+        self.plate_text = tk.Text(
+            plate_tab, height=11, wrap="word", relief="flat",
+            background="#f4f8fb", foreground="#203247", state="disabled")
+        self.plate_text.pack(fill="both", expand=True, pady=(4, 0))
+
+        ttk.Label(
+            content, text="保存位置：{}".format(display_path(self.ocr_dir)),
+            style="Capture.Muted.TLabel", wraplength=225, justify="left").pack(
+            anchor="w", pady=(10, 0))
+
+    def _bind_keys(self) -> None:
+        self.root.bind("<space>", self._on_space)
+        self.root.bind("<Return>", self._on_space)
+        self.root.bind("<Escape>", lambda event: self.close())
+
+    def _focus_is_text(self) -> bool:
+        widget = self.root.focus_get()
+        return isinstance(widget, (tk.Entry, tk.Text, tk.Spinbox,
+                                   ttk.Entry, ttk.Spinbox))
+
+    def _on_space(self, event=None):
+        if self._focus_is_text() or self._dialog_open:
+            return None
+        self.recognize_current()
+        return "break"
+
+    def _selected_kind(self) -> str:
+        try:
+            return "chinese" if self.notebook.index(self.notebook.select()) == 0 else "plate"
+        except Exception:
+            return "chinese"
+
+    def choose_detector(self) -> None:
+        self._dialog_open = True
+        try:
+            path = filedialog.askopenfilename(
+                parent=self.root, title="选择 YOLO 裁剪模型",
+                initialdir=str(Path.home() / "AI视觉"),
+                filetypes=(("YOLO 权重", "*.pt"), ("所有文件", "*.*")))
+        finally:
+            self._dialog_open = False
+        if not path:
+            return
+        self.det_model_var.set(path)
+        self.det_model_display.set(display_path(path))
+        self._set_status("裁剪模型：{}（识别时会先检测再裁图 OCR）".format(
+            display_path(path)))
+
+    def clear_detector(self) -> None:
+        self.det_model_var.set("")
+        self.det_model_display.set("未选择：整图 OCR")
+        self._set_status("已清除裁剪模型，中文 OCR 将读取整图")
+
+    def recognize_current(self) -> None:
+        self.start_ocr(self._selected_kind())
+
+    def start_ocr(self, kind: str) -> None:
+        if self._closed or self._busy:
+            return
+        if self._frame is None:
+            self._set_status("还没有摄像头画面", error=True)
+            return
+        frame = self._frame.copy()
+        options = {}
+        if kind == "chinese":
+            options["detector_model"] = self.det_model_var.get().strip()
+        else:
+            options["plate_mode"] = self.plate_mode_var.get()
+        self._busy = True
+        self._show_result = False
+        self._annotated = None
+        self._last_result = None
+        self.save_button.configure(state="disabled")
+        self._set_buttons(False)
+        target = self.cn_text if kind == "chinese" else self.plate_text
+        self._set_text(target, "识别中…\n首次运行会加载模型，请稍候。")
+        self._set_status("正在识别{}…".format(
+            "中文文字" if kind == "chinese" else "车牌"))
+        worker = threading.Thread(
+            target=self._worker, args=(kind, frame, options), daemon=True)
+        worker.start()
+
+    def _worker(self, kind: str, frame, options) -> None:
+        try:
+            if kind == "chinese":
+                result = self._cn.recognize(
+                    frame, detector_model=options.get("detector_model", ""))
+            else:
+                result = self._plate.recognize(
+                    frame, mode=options.get("plate_mode", "generic"))
+            self._queue.put((kind, result, None))
+        except Exception as error:
+            self._queue.put((kind, None, error))
+
+    def _set_buttons(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for button in self._buttons:
+            try:
+                button.configure(state=state)
+            except tk.TclError:
+                pass
+
+    @staticmethod
+    def _set_text(widget, text: str) -> None:
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", text)
+        widget.configure(state="disabled")
+
+    def _tick(self) -> None:
+        if self._closed:
+            return
+        if not self._busy:
+            try:
+                frame = self.camera.read()
+            except Exception:
+                frame = None
+            if frame is not None:
+                self._frame = frame
+                if not self._show_result:
+                    self._render(frame)
+        self._poll_result()
+        try:
+            self._after_id = self.root.after(50, self._tick)
+        except tk.TclError:
+            self._after_id = None
+
+    def _poll_result(self) -> None:
+        try:
+            kind, result, error = self._queue.get_nowait()
+        except queue.Empty:
+            return
+        self._busy = False
+        self._set_buttons(True)
+        if error is not None:
+            target = self.cn_text if kind == "chinese" else self.plate_text
+            self._set_text(target, "识别失败：{}".format(error))
+            self._set_status("识别失败：{}".format(error), error=True)
+            return
+        self._last_result = result
+        self._annotated = result.annotated
+        self._show_result = result.annotated is not None
+        target = self.cn_text if kind == "chinese" else self.plate_text
+        self._set_text(target, result.text or result.message)
+        self.save_button.configure(
+            state="normal" if result.annotated is not None else "disabled")
+        self._render(self._annotated)
+        self._set_status(
+            "{}：{} 个目标{}".format(
+                "中文文字" if kind == "chinese" else "车牌",
+                len(result.lines),
+                "" if result.message == "" else "（{}）".format(result.message)))
+
+    def _render(self, frame=None) -> None:
+        frame = self._annotated if self._show_result else (
+            frame if frame is not None else self._frame)
+        if frame is None:
+            return
+        try:
+            image = Image.fromarray(frame[:, :, ::-1])
+            photo = self.preview.fit_image(image)
+            self.preview.configure(image=photo, text="")
+        except Exception as error:
+            self._set_status("显示画面失败：{}".format(error), error=True)
+
+    def resume_preview(self) -> None:
+        self._show_result = False
+        self._annotated = None
+        self._render(self._frame)
+        self._set_status("已恢复实时预览")
+
+    def save_result(self) -> None:
+        result = self._last_result
+        if result is None or result.annotated is None:
+            self._set_status("还没有可保存的识别结果", error=True)
+            return
+        try:
+            self.ocr_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            kind_name = "中文" if result.kind == "chinese" else "车牌"
+            image_path = self.ocr_dir / "{}_{}.jpg".format(kind_name, stamp)
+            json_path = self.ocr_dir / "{}_{}.json".format(kind_name, stamp)
+            if not cv2.imwrite(str(image_path), result.annotated):
+                raise OSError("写入图片失败")
+            payload = {
+                "kind": result.kind,
+                "text": result.text,
+                "message": result.message,
+                "lines": [
+                    {"text": line.text, "confidence": line.confidence,
+                     "points": line.points}
+                    for line in result.lines
+                ],
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            with json_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+        except Exception as error:
+            self._set_status("保存失败：{}".format(error), error=True)
+            return
+        self._set_status("已保存：{}（{}）".format(
+            display_path(image_path), json_path.name))
+
+    def _set_status(self, text: str, error: bool = False) -> None:
+        self.status_var.set(text)
+        self.status_label.configure(foreground="#b00020" if error else "#444444")
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._after_id is not None:
+            try:
+                self.root.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+        try:
+            self.camera.release()
+        except Exception:
+            pass
+        self.root.destroy()
+
+
 def _destroy_quietly(widget) -> None:
     try:
         if widget is not None and widget.winfo_exists():
@@ -5226,6 +5578,44 @@ def run_gui_photo(args, output_root: Path, root) -> int:
     return 0
 
 
+def run_gui_ocr(args, output_root: Path, root) -> int:
+    if not OCR_MODULE_AVAILABLE:
+        messagebox.showerror(
+            "文字识别不可用",
+            "缺少 ocr_engine.py。请确认 photo_capture/scripts 下的模块已安装。")
+        root.destroy()
+        return 1
+    camera = Camera(
+        parse_camera_source(args.device),
+        width=args.width, height=args.height, fps=args.fps, mirror=args.mirror,
+        sharpness=args.sharpness, pixel_format=args.pixel_format,
+    )
+    try:
+        camera.open()
+    except CameraError as error:
+        messagebox.showerror("摄像头不可用", str(error))
+        root.destroy()
+        return 1
+    print("[photo_capture] 文字识别模式")
+    print("[photo_capture] 中文：PaddleOCR；车牌：HyperLPR3")
+    print("[photo_capture] 操作：空格识别当前画面，Esc 退出")
+    try:
+        app = OcrApp(root, camera, output_root)
+        root.deiconify()
+        root.lift()
+        app.preview.focus_set()
+        root.mainloop()
+    finally:
+        camera.release()
+    return 0
+
+
+def run_ocr_cli(args, output_root: Path) -> int:
+    print("[photo_capture] 文字识别模式需要图形界面（tkinter）。",
+          file=sys.stderr)
+    return 1
+
+
 def run_gui(args, output_root: Path) -> int:
     root = tk.Tk()
     root.withdraw()
@@ -5249,6 +5639,8 @@ def run_gui(args, output_root: Path) -> int:
         return run_gui_gauge(args, output_root, root)
     if mode == MODE_THERMAL:
         return run_gui_thermal(args, output_root, root)
+    if mode == MODE_OCR:
+        return run_gui_ocr(args, output_root, root)
     return run_gui_photo(args, output_root, root)
 
 # ---------------------------------------------------------------------------
@@ -5868,9 +6260,10 @@ def run_cli(args, output_root: Path) -> int:
         print("  3) 区域扫描（平移拼图）")
         print("  4) 仪表识别（Pose 读温度/湿度表）")
         print("  5) 红外热像（MLX90640）")
+        print("  6) 文字识别（中文/车牌 OCR，仅 GUI）")
         while True:
             try:
-                choice = input("请选择 [1/2/3/4/5]（默认 1）：").strip()
+                choice = input("请选择 [1/2/3/4/5/6]（默认 1）：").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n[photo_capture] 已取消")
                 return 0
@@ -5889,7 +6282,10 @@ def run_cli(args, output_root: Path) -> int:
             if choice == "5":
                 mode = MODE_THERMAL
                 break
-            print("请输入 1 / 2 / 3 / 4 / 5")
+            if choice == "6":
+                mode = MODE_OCR
+                break
+            print("请输入 1 / 2 / 3 / 4 / 5 / 6")
 
     if mode == MODE_DETECT:
         return run_detect_cli(args, output_root)
@@ -5899,6 +6295,8 @@ def run_cli(args, output_root: Path) -> int:
         return run_gauge_cli(args, output_root)
     if mode == MODE_THERMAL:
         return run_thermal_cli(args, output_root)
+    if mode == MODE_OCR:
+        return run_ocr_cli(args, output_root)
 
     try:
         type_name = args.type or prompt_type_cli(output_root)
@@ -5995,10 +6393,10 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="调用本机摄像头拍照，或加载 YOLO 模型做实时检测。",
     )
-    parser.add_argument("--mode", choices=("ask", "photo", "detect", "scan", "gauge", "thermal"),
+    parser.add_argument("--mode", choices=("ask", "photo", "detect", "scan", "gauge", "thermal", "ocr"),
                         default="ask",
                         help="启动模式：ask 每次询问，photo 拍照，detect 模型测试，"
-                             "scan 区域扫描，gauge 仪表识别，thermal 红外热像")
+                             "scan 区域扫描，gauge 仪表识别，thermal 红外热像，ocr 文字识别")
     parser.add_argument("-d", "--output-dir", default=str(DEFAULT_OUTPUT_DIR),
                         help="照片根目录（默认：~/Pictures/photo_capture）")
     parser.add_argument("-t", "--type", default=None,
@@ -6089,8 +6487,8 @@ def parse_args(argv=None):
                         default="long",
                         help="指针刻度弧：long 长弧（默认，常见表计）/ short / auto")
     parser.add_argument("--gauge-pointer", choices=("radon", "tip"),
-                        default="radon",
-                        help="指针角度：radon 正视化后用射线搜索（默认）/ tip 模型尖端")
+                        default="tip",
+                        help="指针角度：tip 模型尖端（默认）/ radon 正视化后射线搜索")
     parser.add_argument("--gauge-temp-min", type=float, default=-30.0,
                         help="温度量程下限（默认 -30）")
     parser.add_argument("--gauge-temp-max", type=float, default=50.0,

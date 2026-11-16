@@ -1,6 +1,6 @@
-# photo_capture —— 拍照 / YOLO 检测 / 区域扫描 / 仪表识别 / 红外热像
+# photo_capture —— 拍照 / YOLO 检测 / 区域扫描 / 仪表识别 / 红外热像 / 文字识别
 
-调用本机摄像头的五个模式：
+调用本机摄像头的六个模式：
 
 - **拍照模式**：按类型采集照片（默认 1280×720），照片存到 `输出目录/类型/`；
   可设连拍张数，运行中换类型。
@@ -12,6 +12,8 @@
   按多刻度插值读数，保存截图和 JSONL 记录。
 - **红外热像模式**：通过 `mlx90640_ros.thermal_session` 显示 MLX90640 热图，
   支持 `capture.bin` 回放、串口实机、楼层标定和 PNG+JSON 快照。
+- **文字识别模式**：同一个 OCR 分区里提供两个页签——
+  PaddleOCR 中文文字识别，和 HyperLPR3 车牌识别；识别结果可保存 JPG+JSON。
 
 > 区域扫描目前只做**平移**场景，不做旋转全景。
 
@@ -35,6 +37,17 @@ python3 -c "import ultralytics, torch; print(ultralytics.__version__, torch.__ve
 红外热像需要先 `source devel/setup.bash` 并确认 `mlx90640_ros` 已 `catkin_make`；
 它走串口，不占用白光摄像头。
 
+文字识别额外依赖 PaddleOCR（中文）和 HyperLPR3 + onnxruntime（车牌）：
+
+```bash
+python3 -c "import paddleocr, hyperlpr3, onnxruntime; print('ocr deps ok')"
+```
+
+本机已安装 PaddleOCR 2.6.1 / paddle 2.6.2、HyperLPR3 0.1.3 / onnxruntime 1.16.3，
+PaddleOCR 模型在 `~/.paddleocr/whl`，HyperLPR3 模型在 `~/.hyperlpr3/20230229`。
+换机器时按 `requirements-ocr.txt` 安装；首次识别如果模型缺失会自动下载。
+中文裁剪模型复用 ultralytics，已随主项目安装。
+
 > OpenCV 编译时没有 GUI 后端（`GUI: NONE`），预览用 tkinter，不用 `cv2.imshow`。
 
 ## 运行
@@ -48,8 +61,8 @@ python3 src/photo_capture/scripts/capture_photos.py
 ```
 
 启动后先弹「选择启动模式」：点按钮或按 `1`（拍照）/ `2`（模型测试）/ `3`（区域扫描）/
-`4`（仪表识别）/ `5`（红外热像）。想跳过询问可以用 `--mode photo` / `--mode detect` /
-`--mode scan` / `--mode gauge` / `--mode thermal`。
+`4`（仪表识别）/ `5`（红外热像）/ `6`（文字识别）。想跳过询问可以用 `--mode photo` /
+`--mode detect` / `--mode scan` / `--mode gauge` / `--mode thermal` / `--mode ocr`。
 
 ## 拍照模式
 
@@ -274,24 +287,29 @@ CLI 自动扫描默认会先打印摘要并等回车确认；`--yes` 跳过。
 | `temperature` | axis, tip, min_value, scale_-10, scale_10, scale_30, max_value | -30 ~ 50 °C |
 | `humidity` | axis, tip, min_value, scale_20, scale_40, scale_70, max_value | 0 ~ 100 %RH |
 
-- 0 轴、2 最小、3/4/5 三个中间刻度、6 最大，这 **6 个静态点**；
-- 1 是指针尖端，动态，**不参与配准**；
-- 6 个静态点已经可以做真正的 **4 点单应**（`cv2.findHomography`），不再受“只有 3 个静态点”的限制。
+- 2~6 的 **5 个刻度点** 是配准锚点；
+- 0 是指针轴心，虽然静态，但**不是刻度圆心**，不参与配准；
+- 1 是指针尖端，动态，不参与配准；
+- 5 个刻度点已经足够做 **4 点单应**（`cv2.findHomography`），并保留轴心相对刻度圆心的真实偏移。
 
 ### 正视化与读数
 
-1. 第一次识别到某类表时自动标定模板：静态点按实际角度映射到 512×512 正视空间，
-   模板存到 `~/Pictures/photo_capture/仪表识别/<模型名>/templates/<类别>.json`；
-2. 每帧用 6 个静态点做单应 `warpPerspective`，`tip` 不参与 warp；
-3. 正视空间里用 Radon 找指针方向，`tip` 只作搜索先验，不明显更优时回退 `tip`；
-4. 用三个中间刻度做**分段线性插值**，而不是只用首尾刻度：
+1. 使用 deli 9011 的固定刻度角模板（湿度 0/20/40/70/100 的实测角，温度用通用
+   270° 模板），**不需要现场正对标定**；模型在斜视画面里检测到 5 个刻度点即可；
+2. 每帧只用 **5 个刻度点**做单应 `warpPerspective` 到 512×512；轴心不参与配准，
+   所以轴心偏离刻度圆心时，偏移会被保留下来；
+3. 正视空间里，把「轴心 → 指针尖端」的射线与刻度圆求正向交点 Q；
+4. 用 Q 相对**刻度圆心**的角度，在 5 个刻度锚点之间做**分段线性插值**：
    - 温度：-30, -10, 10, 30, 50；
    - 湿度：0, 20, 40, 70, 100。
 
+注意：不是把刻度点绕轴心算角度，也不是把轴心当刻度圆心。
+
 例如指针落在 10 和 30 之间，就按 10~30 这一段插值；比只按 -30~50 线性换算更贴近实际表盘。
 
-第一次使用建议让表盘正对相机，按 `T` 标定一次；模板不对也按 `T` 覆盖。按 `V`
-可以查看当前 512×512 正视化图像。
+现在不需要先正对表盘按 `T`；固定模板直接从斜视帧做单应。`T` 只是重新加载固定模板；
+按 `V` 可以查看当前 512×512 正视化图像。换用不同表型时，需要改
+`gauge.py` 里的 `CANONICAL_TICK_ANGLES`（或后续增加自动模板模式）。
 
 默认量程已写入代码：温度 `-30~50`，湿度 `0~100`；需要改时：
 
@@ -302,15 +320,27 @@ rosrun photo_capture capture_photos.py --mode gauge \
 ```
 
 常见表计的刻度从最小值经顶部绕到最大值，默认用**长弧** `--gauge-arc long`；
-如果表盘是短弧，换 `short`，拿不准用 `auto`。指针角度默认 `--gauge-pointer radon`，
-也可切 `tip` 直接使用模型尖端；Radon 假设指针比表盘暗，亮指针/强反光时优先 `tip`。
+如果表盘是短弧，换 `short`，拿不准用 `auto`。指针角度默认 `--gauge-pointer tip`
+（模型尖端），在合成数据上误差最小；`radon` 作为可选的图像细化，亮指针/强反光时不要用。
+
+### 模拟数据验证
+
+用 40 张精确几何合成表盘（temperature/humidity 各 20 张，含 0/5/10/15% 偏心、
+roll ±15°、tilt ±10/20°、640/480 与 1280/720）做离线验证：
+
+- 固定刻度角模板，不使用任何现场标定；每张图只使用 7 个关键点（不使用 manifest 的 H/dial_center/value）；
+- 指针取模型尖端 `tip`，最大绝对误差 **3.5e-6**，40/40 通过；
+- 旧「绕轴心求刻度角」方法最大误差约 0.55（湿度 0.55% FS），说明偏心不能忽略；
+- 旧「0~100 线性换算」在湿度上最大误差约 8.33，说明非线性刻度必须按 5 个锚点插值。
+
+> 合成数据只验证几何，不代表真实照片的检测/反光/遮挡精度；真实表仍需现场用 `T` 标定。
 
 ### 界面操作
 
 | 操作 | 说明 |
 | --- | --- |
 | 点「更换模型」 / `M` | 换一个 `.pt`（必须是 pose 任务） |
-| 点「重新标定」 / `T` | 用当前检测覆盖该类别的正视化模板 |
+| 点「重载模板」 / `T` | 重新加载固定刻度角模板（通常不需要按） |
 | 点「正视化」 / `V` | 查看 512×512 正视化图像 |
 | 点「保存当前帧」 / `S` | 保存带 7 个关键点和读数的截图 |
 | 点「保存读数」 / `R` | 把当前读数追加到 `readings.jsonl` |
@@ -322,7 +352,7 @@ rosrun photo_capture capture_photos.py --mode gauge \
 ```
 ~/Pictures/photo_capture/仪表识别/<模型名>/
 ├── snapshots/<模型名>_YYYYmmdd_HHMMSS_mmm.jpg
-├── templates/<类别>.json
+├── templates/<类别>.json   # 仅旧/自动模板模式使用
 └── readings.jsonl
 ```
 
@@ -339,11 +369,11 @@ rosrun photo_capture capture_photos.py --no-gui --mode gauge \
 rosrun photo_capture capture_photos.py --no-gui --mode gauge \
   --gauge-temp-min -30 --gauge-temp-max 50 \
   --gauge-humidity-min 0 --gauge-humidity-max 100 \
-  --gauge-arc long --gauge-pointer radon
+  --gauge-arc long --gauge-pointer tip
 ```
 
-终端每秒打印一次，`Ctrl+C` 退出。没有图形界面时只打印，不保存截图/JSONL；模板仍会
-自动标定到输出目录下。
+终端每秒打印一次，`Ctrl+C` 退出。没有图形界面时只打印，不保存截图/JSONL；
+7 点模型使用固定刻度角模板，不需要正对标定。
 
 > 模型必须是 pose 任务；选错普通检测模型会提示“所选模型不是 pose 模型”。
 > 关键点置信度低于 `--gauge-kpt-conf`、或关键点挤成一团时不会算读数。
@@ -459,6 +489,90 @@ rosrun photo_capture capture_photos.py --no-gui --mode thermal \
 - 热像和 `roslaunch mlx90640_ros` 二选一；
 - 串口不能用 `/dev/ttyUSB0` 猜，先看 `/dev/serial/by-id/`。
 
+
+## 文字识别模式（中文 OCR / 车牌 OCR）
+
+一个 OCR 模式、两个页签，共用摄像头预览和“保存结果”按钮：
+
+- **中文文字**：PaddleOCR（`lang=ch`），检测中文/英文/数字/标点，结果按 `#序号` 列出；
+  可以选择一个 YOLO 模型先检测楼宇/文字区域，只对裁剪图做 OCR，省掉背景干扰；
+- **车牌识别**：两种模式——
+  - **沙盘/非标（通用 OCR，默认）**：用 PaddleOCR 读车牌框内文字，不要求首字是省份缩写；
+  - **真实车牌（HyperLPR3）**：输出车牌号、车牌类型（蓝牌/黄牌/绿牌等）和置信度。
+
+### 操作
+
+| 操作 | 说明 |
+| --- | --- |
+| 空格 / 回车 | 识别当前画面；用当前选中的页签决定走中文还是车牌 |
+| 「选择裁剪模型…」 | 中文页签可选：先跑 YOLO 检测楼宇/区域，再对裁剪图 OCR |
+| 「清除裁剪模型」 | 回到整图 OCR |
+| 车牌页签「沙盘/非标」 / 「真实车牌」 | 切换通用 OCR 或 HyperLPR3 识别 |
+| 「恢复实时预览」 | 从识别结果图回到摄像头实时画面 |
+| 「保存当前结果」 | 保存带框 JPG + JSON 到 `~/Pictures/photo_capture/OCR/` |
+| `Esc` / 关窗口 | 退出并释放摄像头 |
+
+识别是**手动触发**的，不逐帧跑：按一下抓当前帧，后台线程加载模型/推理，完成后在预览里
+画框并在侧栏列文字。PaddleOCR 中文模型第一次加载约 1 秒；HyperLPR3 首次加载约 1 秒。
+启动时不要连续按，等状态栏显示完成再按。
+
+### 中文 OCR + YOLO 裁剪
+
+中文页签点「选择裁剪模型…」，选任意 Ultralytics `.pt`（例如楼宇检测/`building_d.pt`），
+识别流程变成：
+
+```text
+当前帧 → YOLO 检测框 → 按框外扩 6% 裁剪 → 每个裁剪图跑 PaddleOCR
+       → 文字框坐标映射回原图 → 画框 + 侧栏列表
+```
+
+最多取面积最大的 8 个框。模型没检测到框、或裁剪图没识别到文字时，会**自动回退整图 OCR**，
+状态栏会显示“已回退全图”。模型路径只在当前 GUI 会话里保留，重启后重新选择。
+
+### 车牌：沙盘/非标为什么用通用 OCR
+
+HyperLPR3 的识别字典按真实中国车牌设计，第一字期望是省份简称。比赛沙盘的车牌首字可能
+是任意汉字/字母，HyperLPR3 会把首字“纠正”成某个省份，导致读错。
+
+所以车牌页签默认是**沙盘/非标（通用 OCR）**：
+
+1. HyperLPR3 只负责找车牌框；
+2. PaddleOCR 读取框内文字，不限制首字必须是省份；
+3. 框内没文字时，整图 OCR 后按长宽比 1.8–8.0、长度 5–12 过滤车牌行。
+
+实测合成沙盘牌 `沙B12345`：通用 OCR 读成 `沙B12345`；HyperLPR3 会读成 `京B12345`。
+真实车牌仍可切到 HyperLPR3，获得车牌类型和置信度。
+
+### 为什么选这两个
+
+- 中文文字：本机已有 PaddleOCR + 中文模型，`ch_PP-OCRv4` 对中文/数字/标点效果稳定，
+  比 EasyOCR 更贴近中文场景，CPU 也能到约 1–2 帧/秒；
+- 车牌：HyperLPR3 是专门做中国车牌的检测+识别+颜色分类流水线，比通用 OCR 直接认车牌更稳，
+  对蓝色/绿色/黄色车牌都有对应类型输出。
+
+### 输出
+
+```text
+~/Pictures/photo_capture/OCR/
+├── 中文_YYYYmmdd_HHMMSS_mmm.jpg
+├── 中文_YYYYmmdd_HHMMSS_mmm.json
+├── 车牌_YYYYmmdd_HHMMSS_mmm.jpg
+└── 车牌_YYYYmmdd_HHMMSS_mmm.json
+```
+
+JSON 包含 `kind`、`text`、`message`、每行 `text/confidence/points` 和保存时间。
+中文结果画青蓝色框，车牌结果画橙色框；不使用绿色框。
+
+### 依赖
+
+```bash
+python3 -c "import paddleocr, hyperlpr3, onnxruntime; print('ok')"
+```
+
+本机模型已缓存；若换机器首次运行会自动下载。PaddleOCR 模型目录
+`~/.paddleocr/whl`，HyperLPR3 模型目录 `~/.hyperlpr3/20230229`。
+`onnxruntime` 对 Python 3.8 固定用 1.16.x。
+
 ## 常用参数
 
 | 参数 | 默认值 | 说明 |
@@ -509,7 +623,7 @@ rosrun photo_capture capture_photos.py --no-gui --mode thermal \
 | `--gauge-conf` | `0.5` | 仪表目标置信度 |
 | `--gauge-kpt-conf` | `0.3` | 关键点的最低置信度 |
 | `--gauge-arc` | `long` | `long` / `short` / `auto` 刻度弧 |
-| `--gauge-pointer` | `radon` | `radon` 正视化后射线搜索 / `tip` 模型尖端 |
+| `--gauge-pointer` | `tip` | `tip` 模型尖端（默认）/ `radon` 正视化后射线搜索 |
 | `--gauge-temp-min` | `-30` | 温度量程下限 |
 | `--gauge-temp-max` | `50` | 温度量程上限 |
 | `--gauge-humidity-min` | `0` | 湿度量程下限 |
@@ -596,9 +710,9 @@ YOLO 裁剪图（按模型 / 类别）：
 - **模型测试/全景检测报没有 ultralytics**：`pip3 install ultralytics`，并确认用的是同一个 Python。
 - **仪表识别报“不是 pose 模型”**：要用 gauge.pt 这类姿态权重，不能选普通检测模型。
 - **仪表读数不对**：先确认量程（默认温度 -30~50、湿度 0~100）和刻度弧
-  （`long/short/auto`）；默认长弧适合大多数圆形表。第一次模板标定最好正对表盘，
-  模板不好时按 `T` 重标。中间刻度按 -10/10/30 和 20/40/70 插值，如果表盘刻度值
-  不是这几个数，需要改 `gauge.py` 里的 `gauge_spec_for()`。
+  （`long/short/auto`）；默认长弧适合大多数圆形表。固定模板不要求正对；
+  中间刻度按 -10/10/30 和 20/40/70 插值，如果表盘刻度值/角度不是这套，
+  需要改 `gauge.py` 里的 `gauge_spec_for()` / `CANONICAL_TICK_ANGLES`。
 - **CPU 上很慢**：`--imgsz 416`，或关掉其他占 CPU 的程序；有 GPU 用 `--infer-device cuda`。
 - **拍照还是糊**：确认终端打印的“摄像头画面”是 1280×720，且锐度默认 3；弱光/固定对焦
   （多数小相机）/运动仍会造成模糊，保持静止、补光，或试 `--sharpness 6`、1080p 看细节。

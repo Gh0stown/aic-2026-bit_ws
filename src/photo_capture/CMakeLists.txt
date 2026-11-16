@@ -19,5 +19,6 @@ install(FILES
   scripts/gauge.py
   scripts/thermal_calibration.py
   scripts/building_windows.py
+  scripts/ocr_engine.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

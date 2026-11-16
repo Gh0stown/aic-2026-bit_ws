@@ -3,9 +3,9 @@
   <name>photo_capture</name>
   <version>0.1.0</version>
   <description>
-    摄像头拍照采集、YOLO 实时检测、区域平移扫描拼图、仪表 Pose 识别和 MLX90640 红外热像：
-    按类型保存照片，加载 .pt 权重实时检测，控制麦轮横向平移拼图，读取温度/湿度表指针，
-    或显示/回放热像并保存快照。
+    摄像头拍照采集、YOLO 实时检测、区域平移扫描拼图、仪表 Pose 识别、MLX90640 红外热像
+    和中文/车牌 OCR：按类型保存照片，加载 .pt 权重实时检测，控制麦轮横向平移拼图，
+    读取温度/湿度表指针，显示/回放热像，或用 PaddleOCR/HyperLPR3 识别文字与车牌。
   </description>
   <maintainer email="mowen@todo.todo">mowen</maintainer>
   <license>BSD</license>
