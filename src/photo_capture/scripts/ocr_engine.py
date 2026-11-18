@@ -271,7 +271,17 @@ class PlateOcr:
         width, height = _polygon_size(line.points)
         return 1.8 <= width / float(height) <= 8.0
 
-    def _generic(self, image) -> OcrResult:
+    @staticmethod
+    def _pad_crop(crop, ratio=0.35):
+        height, width = crop.shape[:2]
+        pad_x = max(8, int(width * ratio))
+        pad_y = max(6, int(height * ratio))
+        padded = cv2.copyMakeBorder(
+            crop, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_CONSTANT,
+            value=(80, 80, 80))
+        return padded, pad_x, pad_y
+
+    def _generic_full(self, image) -> OcrResult:
         annotated = image.copy()
         # HyperLPR3 只用来找车牌框；文字由通用 PaddleOCR 读，避免省份字典限制
         try:
@@ -308,15 +318,84 @@ class PlateOcr:
             lines=lines, annotated=annotated,
             message="" if lines else "未识别到车牌文字")
 
-    def _hyperlpr(self, image) -> OcrResult:
+    def _generic(self, image, detector_model="") -> OcrResult:
+        detector_model = str(detector_model or "").strip()
+        if detector_model:
+            boxes = self._ocr._detect_boxes(image, detector_model)
+            if boxes:
+                lines = []
+                used_boxes = []
+                for box in boxes:
+                    crop, clipped = self._ocr._crop(image, box)
+                    used_boxes.append(clipped)
+                    if crop is None:
+                        continue
+                    local = self._ocr._run_paddle(crop)
+                    lines.extend(_offset_lines(local, clipped[0], clipped[1]))
+                if lines:
+                    annotated = self._ocr._annotate(
+                        image, lines, used_boxes, color=(0, 128, 255))
+                    return OcrResult(
+                        ok=True, kind="plate", text=_text_of(lines),
+                        lines=lines, annotated=annotated,
+                        message="车牌裁剪 {} 个区域".format(len(used_boxes)))
+                # 裁剪框内没有文字，继续回退整图检测
+        return self._generic_full(image)
+
+    def _hyperlpr_crop(self, image, detector_model="") -> Optional[OcrResult]:
+        detector_model = str(detector_model or "").strip()
+        if not detector_model:
+            return None
+        boxes = self._ocr._detect_boxes(image, detector_model)
+        if not boxes:
+            return None
+        lines = []
+        used_boxes = []
+        for box in boxes:
+            crop, clipped = self._ocr._crop(image, box)
+            used_boxes.append(clipped)
+            if crop is None:
+                continue
+            # HyperLPR3 对纯车牌图容易漏检；外扩一块背景再识别
+            padded, pad_x, pad_y = self._pad_crop(crop)
+            try:
+                raw = self._engine()(padded) or []
+            except Exception:
+                raw = []
+            for item in raw:
+                try:
+                    code = str(item[0])
+                    score = float(item[1])
+                    plate_type = int(item[2])
+                    px1, py1, px2, py2 = [int(round(v)) for v in item[3]]
+                except Exception:
+                    continue
+                x1 = clipped[0] + px1 - pad_x
+                y1 = clipped[1] + py1 - pad_y
+                x2 = clipped[0] + px2 - pad_x
+                y2 = clipped[1] + py2 - pad_y
+                type_name = PLATE_TYPE_NAMES.get(plate_type, str(plate_type))
+                lines.append(OcrLine(
+                    text="{} {}".format(code, type_name),
+                    confidence=score,
+                    points=[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]))
+        if not lines:
+            return None
+        annotated = self._ocr._annotate(
+            image, lines, used_boxes, color=(0, 128, 255))
+        return OcrResult(
+            ok=True, kind="plate", text=_text_of(lines),
+            lines=lines, annotated=annotated,
+            message="HyperLPR3 裁剪加背景")
+
+    def _hyperlpr(self, image, crop_boxes=None) -> OcrResult:
         catcher = self._engine()
         try:
             raw = catcher(image)
         except Exception as error:
             raise OcrError("车牌识别失败：{}".format(error))
         lines = []
-        annotated = image.copy()
-        for index, item in enumerate(raw or [], 1):
+        for item in raw or []:
             try:
                 code = str(item[0])
                 score = float(item[1])
@@ -326,21 +405,25 @@ class PlateOcr:
                 continue
             type_name = PLATE_TYPE_NAMES.get(plate_type, str(plate_type))
             x1, y1, x2, y2 = box
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 128, 255), 2)
-            cv2.putText(annotated, "#{}".format(index),
-                        (x1, max(8, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6, (0, 128, 255), 2)
             lines.append(OcrLine(
                 text="{} {}".format(code, type_name),
                 confidence=score,
                 points=[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]))
+        annotated = self._ocr._annotate(
+            image, lines, crop_boxes, color=(0, 128, 255)) if lines else image.copy()
         return OcrResult(
             ok=bool(lines), kind="plate", text=_text_of(lines),
             lines=lines, annotated=annotated,
             message="" if lines else "未识别到车牌")
 
-    def recognize(self, image, mode: str = "generic") -> OcrResult:
+    def recognize(self, image, mode: str = "generic",
+                  detector_model: str = "") -> OcrResult:
         image = _ensure_bgr(image)
+        detector_model = str(detector_model or "").strip()
         if str(mode or "").lower() == "hyperlpr":
+            if detector_model:
+                result = self._hyperlpr_crop(image, detector_model)
+                if result is not None:
+                    return result
             return self._hyperlpr(image)
-        return self._generic(image)
+        return self._generic(image, detector_model)

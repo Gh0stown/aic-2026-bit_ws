@@ -4827,6 +4827,12 @@ class OcrApp(object):
         self.status_var = tk.StringVar(value="就绪：按空格识别当前画面")
         self.det_model_var = tk.StringVar(value="")
         self.det_model_display = tk.StringVar(value="未选择：整图 OCR")
+        default_plate = Path.home() / "AI视觉" / "plate.pt"
+        self.plate_det_model_var = tk.StringVar(
+            value=str(default_plate) if default_plate.exists() else "")
+        self.plate_det_model_display = tk.StringVar(
+            value=display_path(default_plate) if default_plate.exists()
+            else "未选择：整图检测")
         self.plate_mode_var = tk.StringVar(value="generic")
         self._build_ui()
         self._bind_keys()
@@ -4894,11 +4900,24 @@ class OcrApp(object):
             text="沙盘车牌首字不一定是省份，建议用通用 OCR；真实车牌选 HyperLPR3。",
             style="Capture.Muted.TLabel", wraplength=225, justify="left").pack(
             anchor="w", pady=(0, 5))
+        ttk.Label(
+            plate_tab, text="车牌裁剪 YOLO（可选，推荐 plate.pt）",
+            style="Capture.Section.TLabel").pack(anchor="w", pady=(2, 2))
+        ttk.Label(
+            plate_tab, textvariable=self.plate_det_model_display,
+            style="Capture.Muted.TLabel", wraplength=225, justify="left").pack(
+            anchor="w", pady=(0, 3))
+        choose_plate_button = _action(
+            plate_tab, "选择车牌裁剪模型…", self.choose_plate_detector)
+        self._buttons.append(choose_plate_button)
+        clear_plate_button = _action(
+            plate_tab, "清除车牌裁剪模型", self.clear_plate_detector)
+        self._buttons.append(clear_plate_button)
         ttk.Radiobutton(
-            plate_tab, text="沙盘/非标（通用 OCR）", value="generic",
+            plate_tab, text="通用 OCR（沙盘/非标，推荐）", value="generic",
             variable=self.plate_mode_var).pack(anchor="w", pady=(2, 0))
         ttk.Radiobutton(
-            plate_tab, text="真实车牌（HyperLPR3）", value="hyperlpr",
+            plate_tab, text="HyperLPR3（真实车牌）", value="hyperlpr",
             variable=self.plate_mode_var).pack(anchor="w", pady=(0, 5))
         plate_button = _action(
             plate_tab, "识别车牌", lambda: self.start_ocr("plate"))
@@ -4956,6 +4975,26 @@ class OcrApp(object):
         self.det_model_display.set("未选择：整图 OCR")
         self._set_status("已清除裁剪模型，中文 OCR 将读取整图")
 
+    def choose_plate_detector(self) -> None:
+        self._dialog_open = True
+        try:
+            path = filedialog.askopenfilename(
+                parent=self.root, title="选择车牌 YOLO 裁剪模型",
+                initialdir=str(Path.home() / "AI视觉"),
+                filetypes=(("YOLO 权重", "*.pt"), ("所有文件", "*.*")))
+        finally:
+            self._dialog_open = False
+        if not path:
+            return
+        self.plate_det_model_var.set(path)
+        self.plate_det_model_display.set(display_path(path))
+        self._set_status("车牌裁剪模型：{}".format(display_path(path)))
+
+    def clear_plate_detector(self) -> None:
+        self.plate_det_model_var.set("")
+        self.plate_det_model_display.set("未选择：整图检测")
+        self._set_status("已清除车牌裁剪模型，车牌将整图检测")
+
     def recognize_current(self) -> None:
         self.start_ocr(self._selected_kind())
 
@@ -4971,6 +5010,7 @@ class OcrApp(object):
             options["detector_model"] = self.det_model_var.get().strip()
         else:
             options["plate_mode"] = self.plate_mode_var.get()
+            options["plate_detector_model"] = self.plate_det_model_var.get().strip()
         self._busy = True
         self._show_result = False
         self._annotated = None
@@ -4992,7 +5032,8 @@ class OcrApp(object):
                     frame, detector_model=options.get("detector_model", ""))
             else:
                 result = self._plate.recognize(
-                    frame, mode=options.get("plate_mode", "generic"))
+                    frame, mode=options.get("plate_mode", "generic"),
+                    detector_model=options.get("plate_detector_model", ""))
             self._queue.put((kind, result, None))
         except Exception as error:
             self._queue.put((kind, None, error))
