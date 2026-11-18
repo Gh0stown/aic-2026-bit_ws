@@ -6,11 +6,14 @@
     1. 不再“来一条 /cmd_vel 才写一包”，而是以 ~rate Hz 持续重复发送最后一条速度，
        底盘收到的指令是连续的，不会因为 move_base 只有 5Hz 而一冲一停；
     2. 看门狗：超过 ~watchdog 秒没收到新 /cmd_vel，自动发零速度停车；
-    3. 退出（Ctrl-C）时发零速度并关串口，避免“脚本停了车还在跑”；
-    4. 去掉了每条消息里的 print，减少回调阻塞。
+    3. 退出（Ctrl-C / 关终端 SIGHUP / SIGTERM）时先停发送线程，再连发多次零速度并关串口；
+    4. 串口写入全程加锁，退出时不会和发送线程的包交错，避免“半包”被底盘解析成随机速度；
+    5. 去掉了每条消息里的 print，减少回调阻塞。
 协议保持不变：AA BB 0A 12 02 xL xH yL yH thL thH 00。
 """
 
+import atexit
+import signal
 import threading
 import time
 
@@ -34,7 +37,11 @@ class ChassisDriver(object):
         self.ser = serial.Serial(self.port, 115200, timeout=5)
         rospy.loginfo('串口已打开：%s', self.port)
 
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()       # 保护 last / last_time
+        self.io_lock = threading.Lock()    # 保护串口整包写入
+        self.closing = threading.Event()
+        self._closed = False
+        self._send_thread = None
         self.last = Twist()
         self.last_time = 0.0
 
@@ -42,15 +49,30 @@ class ChassisDriver(object):
 
         rospy.Subscriber('cmd_vel', Twist, self._cmd_cb, queue_size=1)
         rospy.on_shutdown(self._shutdown)
-        threading.Thread(target=self._send_loop, daemon=True).start()
+        atexit.register(self._shutdown)
+        for sig in (signal.SIGHUP, signal.SIGTERM):
+            try:
+                signal.signal(sig, self._signal)
+            except Exception:  # noqa: BLE001
+                pass
+        self._send_thread = threading.Thread(target=self._send_loop, daemon=True)
+        self._send_thread.start()
         rospy.loginfo('底盘驱动就绪：%.0fHz 重复发送，%.1fs 无指令自动停车',
                       self.rate_hz, self.watchdog)
 
+    def _signal(self, signum, _frame):
+        rospy.logwarn('收到信号 %s，准备停车退出', signum)
+        try:
+            rospy.signal_shutdown('signal %s' % signum)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _init_chassis(self):
-        self.ser.write(b'\x11')
-        for _ in range(8):
-            time.sleep(0.001)
-            self.ser.write(b'\x00')
+        with self.io_lock:
+            self.ser.write(b'\x11')
+            for _ in range(8):
+                time.sleep(0.001)
+                self.ser.write(b'\x00')
 
     def _cmd_cb(self, msg):
         with self.lock:
@@ -63,28 +85,49 @@ class ChassisDriver(object):
         tl, th = encode(twist.angular.z)
         packet = [0xAA, 0xBB, 0x0A, 0x12, 0x02,
                   xl, xh, yl, yh, tl, th, 0x00]
-        # 保持和旧驱动一致的逐字节发送 + 间隔，避免部分底盘固件吞包
-        for b in packet:
-            self.ser.write(bytes([b]))
-            time.sleep(0.0004)
+        # 整包持有 io_lock，避免发送线程和退出停车包交错
+        with self.io_lock:
+            # 保持和旧驱动一致的逐字节发送 + 间隔，避免部分底盘固件吞包
+            for b in packet:
+                self.ser.write(bytes([b]))
+                time.sleep(0.0004)
 
     def _send_loop(self):
         rate = rospy.Rate(self.rate_hz)
-        while not rospy.is_shutdown():
+        while not rospy.is_shutdown() and not self.closing.is_set():
             with self.lock:
                 twist = self.last
                 fresh = (time.time() - self.last_time) <= self.watchdog
             if not fresh:
                 twist = Twist()
+            if self.closing.is_set():
+                break
             try:
                 self._write(twist)
             except Exception as exc:  # noqa: BLE001
                 rospy.logerr_throttle(1.0, '串口写入失败：%s', exc)
+                break
             rate.sleep()
 
     def _shutdown(self):
+        if self._closed:
+            return
+        self._closed = True
+        self.closing.set()
+        if self._send_thread is not None:
+            try:
+                self._send_thread.join(timeout=0.3)
+            except Exception:  # noqa: BLE001
+                pass
+        # 连发 3 次零速度，确保底盘收到完整停车包
+        for _ in range(3):
+            try:
+                self._write(Twist())
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.01)
         try:
-            self._write(Twist())
+            self.ser.flush()
         except Exception:  # noqa: BLE001
             pass
         try:
