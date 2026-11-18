@@ -26,6 +26,7 @@ import datetime
 import math
 import os
 import threading
+import time
 
 import tkinter as tk
 import tkinter.font as tkfont
@@ -37,6 +38,7 @@ from PIL import Image, ImageTk
 import rospy
 import tf
 import tf.transformations as tf_trans
+from geometry_msgs.msg import Twist
 
 PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_MAP = os.path.join(PKG_DIR, 'map', 'mymap_20261106_1916_clean.yaml')
@@ -111,9 +113,13 @@ class WaypointGui(object):
         self.pose_source = PoseSource(MAP_FRAME, BASE_FRAME)
         self.pose_items = {}
         self.arrow = None
+        self.teleop_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
+        self.teleop_keys = {}
+        self._teleop_active = False
 
         self._setup_fonts()
         self._build_ui()
+        self.root.bind_all('<KeyPress>', self._on_key)
         self._draw_map()
         self.refresh()
         children = self.tree.get_children()
@@ -121,6 +127,7 @@ class WaypointGui(object):
             self.tree.selection_set(children[0])
             self.tree.focus(children[0])
         self.root.after(100, self._tick)
+        self._teleop_tick()
 
     # ---------- 界面 ----------
     def _setup_fonts(self):
@@ -315,6 +322,8 @@ class WaypointGui(object):
         ttk.Label(map_footer, text='滚轮缩放 · 拖动平移 · 单击点位联动列表',
                   style='Muted.TLabel', font=(self.font_family, 9)).pack(anchor='w', pady=(3, 0))
         ttk.Label(map_footer, text='地图操作只改变视图，不写入坐标；记录仍取实时 TF。',
+                  style='Muted.TLabel', font=(self.font_family, 9)).pack(anchor='w', pady=(3, 0))
+        ttk.Label(map_footer, text='键盘：W/S 前后  A/D 平移  Q/E 旋转  空格停',
                   style='Muted.TLabel', font=(self.font_family, 9)).pack(anchor='w', pady=(3, 0))
         map_footer.bind('<Configure>', lambda e: self.pose_label.configure(wraplength=e.width))
         self.canvas = tk.Canvas(right, width=CANVAS_MAX_W, height=CANVAS_MAX_H,
@@ -690,6 +699,51 @@ class WaypointGui(object):
             self.custom_var.set('')
 
     # ---------- 定时刷新位姿 ----------
+    def _on_key(self, event):
+        focus = self.root.focus_get()
+        if isinstance(focus, (tk.Entry, tk.Text, ttk.Entry, ttk.Spinbox, ttk.Combobox)):
+            return
+        key = event.keysym.lower()
+        if key in ('w', 'a', 's', 'd', 'q', 'e'):
+            self.teleop_keys[key] = time.monotonic()
+        elif key == 'space':
+            self.teleop_keys.clear()
+            self._teleop_zero()
+
+    def _teleop_zero(self):
+        try:
+            self.teleop_pub.publish(Twist())
+        except Exception:  # noqa: BLE001
+            pass
+        self._teleop_active = False
+
+    def _teleop_tick(self):
+        try:
+            now = time.monotonic()
+            active = {k: t for k, t in self.teleop_keys.items() if now - t < 0.3}
+            self.teleop_keys = active
+            if active:
+                twist = Twist()
+                v = 0.12
+                if 'w' in active:
+                    twist.linear.x += v
+                if 's' in active:
+                    twist.linear.x -= v
+                if 'a' in active:
+                    twist.linear.y += v
+                if 'd' in active:
+                    twist.linear.y -= v
+                if 'q' in active:
+                    twist.angular.z += 0.5
+                if 'e' in active:
+                    twist.angular.z -= 0.5
+                self.teleop_pub.publish(twist)
+                self._teleop_active = True
+            elif self._teleop_active:
+                self._teleop_zero()
+        finally:
+            self.root.after(50, self._teleop_tick)
+
     def _tick(self):
         pose, ok = self.pose_source.get()
         if ok and pose is not None:
@@ -723,6 +777,8 @@ class WaypointGui(object):
         self.canvas.tag_raise(self.arrow)
 
     def on_close(self):
+        self.teleop_keys.clear()
+        self._teleop_zero()
         rospy.signal_shutdown('gui closed')
         self.root.destroy()
 
