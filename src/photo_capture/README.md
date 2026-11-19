@@ -64,6 +64,46 @@ python3 src/photo_capture/scripts/capture_photos.py
 `4`（仪表识别）/ `5`（红外热像）/ `6`（文字识别）。想跳过询问可以用 `--mode photo` /
 `--mode detect` / `--mode scan` / `--mode gauge` / `--mode thermal` / `--mode ocr`。
 
+### 选择摄像头
+
+图形界面选完模式后会再弹「选择摄像头」，列出当前 `/dev/video*` 和 sysfs 设备名（例如
+`Fic760xUsbCamera`、`Orbbec DaBai DCW2 RGB Camera`），选中的设备会用于本次所有模式。
+同一个物理摄像头的多个 video 节点（如 video0/video1）按设备名去重，只显示第一个。
+
+- 列表里直接选；也可以手动输入 `/dev/video2`、`2` 或视频文件路径；
+- 想跳过弹窗，启动时显式指定，例如 `--device /dev/video2`；
+- CLI（`--no-gui`）不弹窗，不填 `--device` 时仍默认 0，填 `--device 2` 选第二个摄像头。
+
+### 新相机（Fic760x）GUI 预设
+
+`CameraSelectDialog` 会根据 sysfs 设备名识别 `Fic760x`，选完设备后按模式自动套用
+[camera_quality_tuning.md](../../docs/camera_quality_tuning.md) 的推荐值：
+
+| 模式 | 分辨率 | FPS | 锐度 | 说明 |
+| --- | --- | --- | --- | --- |
+| 拍照 / 仪表 / OCR | **2592×1944**（5MP，4:3） | 15 | 32 | 目标占更多像素；5MP 是中心裁切，取景约窄 1.33× |
+| 检测 / 区域扫描 | 1280×720 | 30 | 32 | 实时 YOLO/拼接，5MP 解码太慢 |
+| 红外热像的 RGB 预览 | 1280×720 | 30 | 32 | 只做热像旁路预览 |
+| Orbbec RGB / 旧相机 | 1280×720 | 相机默认 | 3 | 保持旧行为 |
+
+用户显式传 `--width/--height/--fps/--sharpness` 时优先使用用户值；4K 备选需要手动指定：
+
+```bash
+rosrun photo_capture capture_photos.py --mode photo \
+  --device /dev/video0 --width 3840 --height 2160
+```
+
+Fic 相机的对焦是**手动镜头**，软件 focus 无效，清晰度首先靠拧镜头环；5MP/4K 用 MJPG
+压缩流，USB2 下与 Orbbec 同时高负载可能掉帧。
+
+```bash
+# 选新加的白光摄像头（当前通常是 video0）
+rosrun photo_capture capture_photos.py --mode photo --device /dev/video0
+
+# CLI 指定 Orbbec RGB（当前通常是 video2）
+rosrun photo_capture capture_photos.py --no-gui --mode photo --device 2
+```
+
 ## 拍照模式
 
 选完模式后出现「拍摄设置」：填照片类型（可直接输入新类型，也可双击已有类型）、
@@ -668,6 +708,21 @@ python3 -c "import paddleocr, hyperlpr3, onnxruntime; print('ok')"
 - 如果 720p + 锐度 3 下仍然觉得糊，先排除对焦/光照/运动：这类小相机通常是固定对焦，
   弱光下噪点和长曝光会糊；拍照时保持静止、补光，比继续加分辨率更有效。
   可用 `--sharpness 6` 对比，或 `--sharpness -1` 完全不动摄像头设置。
+
+### 新相机（Fic760x，`/dev/video0`）
+
+上面几条是旧 UVC 相机的取舍。2026-11 换上的 Fic760x 是 5MP/4K 模组，规则不同：
+
+- 支持 MJPG `2592×1944`（5MP，4:3，中心裁切、目标更大）和 `3840×2160`（4K，16:9，
+  与 720p 同视野、细节最多），30fps 档实测都能跑 ~29fps；默认 `1280×720` 只用了
+  很小一部分像素。拍仪表/文字建议 `--width 2592 --height 1944 --sharpness 32`。
+- **手动对焦**：说明书要求旋转镜头环调焦（不要拧到最里面）。固件里的
+  `Focus, Absolute` / 连续自动对焦控制实测无效，软件调不了焦；换拍摄距离要重新对焦。
+- 锐度范围是 `1–64`（默认 `32`），不是 `0–6`；`--sharpness 3` 只是最小值附近，
+  与默认 32 的差别远小于对焦/分辨率。日常用 `--sharpness 32` 或 `-1`（不改相机值）。
+- 逆光（背后窗户）时表盘会暗、噪点高，补光比拉锐度有效。
+- 完整实测数据、四分辨率视野对比和推荐参数见
+  [摄像头画质调研](../../docs/camera_quality_tuning.md)。
 
 ## 保存规则
 

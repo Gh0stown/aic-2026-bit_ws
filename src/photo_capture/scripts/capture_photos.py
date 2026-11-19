@@ -219,6 +219,89 @@ def parse_camera_source(text: object) -> Union[int, str]:
     return source
 
 
+def list_video_cameras():
+    """列出 /dev/video*，按物理设备名去重，返回 (index, path, name)。"""
+    devices = []
+    seen = set()
+    paths = []
+    for path in Path("/dev").glob("video*"):
+        match = re.fullmatch(r"video(\d+)", path.name)
+        if match:
+            paths.append((int(match.group(1)), path))
+    for index, path in sorted(paths):
+        name = ""
+        try:
+            name = Path("/sys/class/video4linux").joinpath(
+                path.name, "name").read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+        key = name or path.name
+        if key in seen:
+            continue
+        seen.add(key)
+        devices.append((index, str(path), name or "摄像头 {}".format(index)))
+    return devices
+
+
+def camera_name_for_source(source):
+    """返回 /dev/videoN 对应的 sysfs 设备名；找不到返回空串。"""
+    parsed = parse_camera_source(source)
+    if isinstance(parsed, int):
+        path = "/dev/video{}".format(parsed)
+    else:
+        path = str(parsed)
+    for _, device_path, name in list_video_cameras():
+        if device_path == path:
+            return name
+    match = re.fullmatch(r"/dev/video(\d+)", path)
+    if match:
+        try:
+            return Path("/sys/class/video4linux").joinpath(
+                "video{}".format(match.group(1)), "name").read_text(
+                    encoding="utf-8").strip()
+        except Exception:
+            pass
+    return ""
+
+
+def apply_gui_camera_defaults(args, mode, device_name) -> None:
+    """按设备/模式套用新相机预设；用户显式传的参数优先。"""
+    is_fic = "Fic760x" in str(device_name or "")
+    if is_fic:
+        if mode in (MODE_PHOTO, MODE_GAUGE, MODE_OCR):
+            default_w, default_h, default_fps, default_sharp = 2592, 1944, 15.0, 32
+        elif mode in (MODE_DETECT, MODE_SCAN, MODE_THERMAL):
+            default_w, default_h, default_fps, default_sharp = 1280, 720, 30.0, 32
+        else:
+            default_w, default_h, default_fps, default_sharp = 1280, 720, 30.0, 32
+    else:
+        # Orbbec RGB / 旧相机保持原有行为
+        default_w, default_h, default_fps, default_sharp = 1280, 720, 0.0, 3
+    if args.width is None and args.height is None:
+        args.width, args.height = default_w, default_h
+    else:
+        if args.width is None:
+            args.width = 0
+        if args.height is None:
+            args.height = 0
+    if args.fps is None:
+        args.fps = default_fps
+    if args.sharpness is None:
+        args.sharpness = default_sharp
+
+
+def fill_cli_camera_defaults(args) -> None:
+    """CLI 保持 1280x720、相机默认帧率、锐度 3 的旧行为。"""
+    if args.width is None:
+        args.width = 1280
+    if args.height is None:
+        args.height = 720
+    if args.fps is None:
+        args.fps = 0.0
+    if args.sharpness is None:
+        args.sharpness = 3
+
+
 def parse_count(text: object, default: int = 1) -> int:
     try:
         count = int(str(text).strip())
@@ -361,7 +444,7 @@ def has_display() -> bool:
 
 class Camera:
     def __init__(self, source: Union[int, str], width: int = 0, height: int = 0,
-                 fps: float = 0.0, mirror: bool = False, sharpness: int = 3,
+                 fps: float = 0.0, mirror: bool = False, sharpness: int = 32,
                  pixel_format: str = "auto"):
         self.source = source
         self.width = int(width or 0)
@@ -1053,6 +1136,125 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         if mode == MODE_OCR and not OCR_MODULE_AVAILABLE:
             return
         self.result = mode
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
+class CameraSelectDialog(tk.Toplevel if TK_AVAILABLE else object):
+    """启动时选择 UVC 摄像头；默认选中 --device 或第一个设备。"""
+
+    def __init__(self, parent, current="0"):
+        if not TK_AVAILABLE:
+            raise RuntimeError("tkinter 不可用")
+        super().__init__(parent)
+        _setup_gui_theme(self)
+        self.result = None
+        self.current = parse_camera_source(current)
+        self.devices = list_video_cameras()
+        self._title_font = tkfont.Font(root=self, size=13, weight="bold")
+        self._small_font = tkfont.Font(root=self, size=10)
+        self.title("选择摄像头 - {}".format(APP_TITLE))
+        self.resizable(False, False)
+        try:
+            if parent.winfo_viewable():
+                self.transient(parent)
+        except tk.TclError:
+            pass
+        self._build()
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Return>", lambda event: self._ok())
+        self.bind("<Escape>", lambda event: self._cancel())
+        self.update_idletasks()
+        self._center()
+        self.listbox.focus_set()
+
+    def _build(self) -> None:
+        body = _dialog_body(self, "选择摄像头")
+        ttk.Label(
+            body, text="检测到以下 /dev/video*；选择后所有模式都会用这个设备。",
+            font=self._small_font, foreground="#666666", wraplength=460,
+            justify="left").pack(anchor="w", pady=(0, 8))
+        ttk.Label(
+            body,
+            text="Fic760x 新相机默认：拍照/仪表/OCR 2592×1944@15，"
+                 "检测/扫描 1280×720@30，锐度 32；旧相机保持 1280×720。",
+            font=self._small_font, foreground="#087f8c", wraplength=460,
+            justify="left").pack(anchor="w", pady=(0, 6))
+        self.listbox = tk.Listbox(
+            body, height=min(7, max(2, len(self.devices))),
+            exportselection=False, activestyle="dotbox",
+            font="TkDefaultFont", background="#f4f8fb",
+            foreground="#203247", relief="flat",
+            selectbackground="#d8eeef", selectforeground="#075b65")
+        self.listbox.pack(fill="x")
+        self.listbox.bind("<Double-Button-1>", lambda event: self._ok())
+        ttk.Label(
+            body, text="或手动输入编号 / 路径（/dev/video2、2、视频文件）",
+            font=self._small_font, foreground="#666666").pack(
+            anchor="w", pady=(8, 2))
+        self.manual_var = tk.StringVar(value="")
+        self.manual_entry = ttk.Entry(body, textvariable=self.manual_var, width=38)
+        self.manual_entry.pack(fill="x")
+        self.error_var = tk.StringVar(value="")
+        ttk.Label(body, textvariable=self.error_var,
+                  foreground="#b00020").pack(anchor="w", pady=(4, 0))
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(buttons, text="刷新", command=self._refresh).pack(side="left")
+        ttk.Button(buttons, text="取消", command=self._cancel).pack(side="right")
+        ttk.Button(buttons, text="使用此摄像头", command=self._ok,
+                   style="Capture.Accent.TButton").pack(side="right", padx=(0, 8))
+        self._fill()
+
+    def _fill(self) -> None:
+        self.listbox.delete(0, "end")
+        for index, path, name in self.devices:
+            self.listbox.insert(
+                "end", "video{}  —  {}".format(index, name))
+        if not self.devices:
+            self.listbox.insert("end", "未发现 /dev/video*，请手动输入")
+            self.listbox.configure(state="disabled")
+            return
+        self.listbox.configure(state="normal")
+        target = None
+        if isinstance(self.current, int):
+            target = "/dev/video{}".format(self.current)
+        elif isinstance(self.current, str):
+            target = self.current
+        for row, (_, path, _) in enumerate(self.devices):
+            if path == target or (target and target.endswith(path)):
+                self.listbox.selection_set(row)
+                self.listbox.see(row)
+                return
+        self.listbox.selection_set(0)
+
+    def _refresh(self) -> None:
+        self.devices = list_video_cameras()
+        self.error_var.set("")
+        self._fill()
+
+    def _center(self) -> None:
+        self.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        x = max(0, (self.winfo_screenwidth() - width) // 2)
+        y = max(0, (self.winfo_screenheight() - height) // 3)
+        self.geometry("+{}+{}".format(x, y))
+
+    def _ok(self) -> None:
+        manual = self.manual_var.get().strip()
+        if manual:
+            self.result = manual
+            self.destroy()
+            return
+        selection = self.listbox.curselection()
+        if not self.devices or not selection:
+            self.error_var.set("请选择一个摄像头，或手动输入设备")
+            return
+        self.result = self.devices[selection[0]][1]
         self.destroy()
 
     def _cancel(self) -> None:
@@ -5672,6 +5874,23 @@ def run_gui(args, output_root: Path) -> int:
             print("[photo_capture] 已取消")
             return 0
 
+    if args.device is None:
+        dialog = CameraSelectDialog(root, current="0")
+        root.wait_window(dialog)
+        if not dialog.result:
+            root.destroy()
+            print("[photo_capture] 已取消摄像头选择")
+            return 0
+        args.device = dialog.result
+    elif args.device == "":
+        args.device = "0"
+
+    device_name = camera_name_for_source(args.device)
+    apply_gui_camera_defaults(args, mode, device_name)
+    print("[photo_capture] 摄像头：{}（{}）{}×{} @ {}fps sharpness {}".format(
+        args.device, device_name or "未知设备", args.width, args.height,
+        args.fps, args.sharpness))
+
     if mode == MODE_DETECT:
         return run_gui_detect(args, output_root, root)
     if mode == MODE_SCAN:
@@ -6290,6 +6509,9 @@ def run_thermal_cli(args, output_root: Path) -> int:
 
 
 def run_cli(args, output_root: Path) -> int:
+    if not args.device:
+        args.device = "0"
+    fill_cli_camera_defaults(args)
     print("[photo_capture] 输出根目录：{}".format(display_path(output_root)))
     print("[photo_capture] 命令行模式（没有图形界面时使用）")
 
@@ -6444,8 +6666,9 @@ def parse_args(argv=None):
                         help="预填照片类型；命令行模式下不再询问")
     parser.add_argument("-c", "--count", type=int, default=1,
                         help="一次连拍张数，1-{}（默认 1）".format(MAX_BURST))
-    parser.add_argument("--device", default="0",
-                        help="摄像头编号 / 设备路径 / 视频文件（默认 0，即 /dev/video0）")
+    parser.add_argument("--device", default=None,
+                        help="摄像头编号 / 设备路径 / 视频文件；"
+                             "GUI 不填会弹出选择框，CLI 不填用 0")
     parser.add_argument("--model", default=None,
                         help="YOLO 权重路径或文件名；模型测试模式不填则启动时选择")
     parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR),
@@ -6457,13 +6680,14 @@ def parse_args(argv=None):
     parser.add_argument("--infer-device", choices=("auto", "cpu", "cuda"),
                         default="auto",
                         help="推理设备（默认 auto：有 CUDA 用 GPU，否则 CPU）")
-    parser.add_argument("--width", type=int, default=1280,
-                        help="采集宽度（默认 1280；0 表示用摄像头默认值）")
-    parser.add_argument("--height", type=int, default=720,
-                        help="采集高度（默认 720；0 表示用摄像头默认值）")
-    parser.add_argument("--fps", type=float, default=0, help="采集帧率，0 表示用摄像头默认值")
-    parser.add_argument("--sharpness", type=int, default=3,
-                        help="摄像头锐度 0-6（默认 3；6 更硬但噪点更明显；-1 保持原值）")
+    parser.add_argument("--width", type=int, default=None,
+                        help="采集宽度；GUI 默认按设备和模式（Fic 相机拍照/仪表/OCR 2592），0 用相机默认")
+    parser.add_argument("--height", type=int, default=None,
+                        help="采集高度；GUI 默认按设备和模式（Fic 相机拍照/仪表/OCR 1944），0 用相机默认")
+    parser.add_argument("--fps", type=float, default=None,
+                        help="采集帧率；GUI 默认按设备和模式（Fic 5MP 15fps，检测 30fps），0 用相机默认")
+    parser.add_argument("--sharpness", type=int, default=None,
+                        help="摄像头锐度 1-64；GUI 新相机默认 32，旧相机 3，-1 保持原值")
     parser.add_argument("--pixel-format", choices=("auto", "mjpg", "yuyv"),
                         default="auto",
                         help="取流格式：auto 默认高分辨率用 MJPG；yuyv 未压缩但帧率低")
