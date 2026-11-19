@@ -13,7 +13,7 @@
 | 底盘 | 两轮差速 + 麦轮平移，车宽约 30cm；串口 `/dev/carserial`，115200 |
 | 雷达 | 镭神 lslidar，发布 `/scan`，frame `laser_link` |
 | IMU | WIT，发布 `/wit/imu` |
-| 相机 | UVC 摄像头 `/dev/video0`（拍照用）；Orbbec Dabai DCW2（深度，可选） |
+| 相机 | Fic760x 5MP/4K UVC 摄像头 `/dev/video0`（MJPG，手动对焦；拍照/仪表建议 5MP，见 [摄像头画质调研](docs/camera_quality_tuning.md)）；Orbbec Dabai DCW2（深度，可选） |
 | 场地 | 4.4m × 4.4m 方形，道路宽约 60cm；地图上只有四周墙体 |
 
 ## 环境与编译
