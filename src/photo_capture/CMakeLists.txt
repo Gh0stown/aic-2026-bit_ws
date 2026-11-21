@@ -18,6 +18,7 @@ install(FILES
   scripts/chassis.py
   scripts/gauge.py
   scripts/gauge_exp16.py
+  scripts/gauge_exp16_stability.py
   scripts/thermal_calibration.py
   scripts/building_windows.py
   scripts/ocr_engine.py

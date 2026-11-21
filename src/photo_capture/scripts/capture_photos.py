@@ -56,7 +56,6 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime
@@ -3604,16 +3603,22 @@ def calibration_ir_image(frame, scale, tmin=20.0, tmax=35.0):
 
 
 class Exp16GaugeApp:
-    """独立测试窗口：仅显示与读数严格同帧的标注，不接入任务执行链路。"""
+    """独立测试窗口：按轮确认读数，缺测的表自动续采。"""
 
     POLL_MS = 50
     PROCESS_INTERVAL = 0.2
-    LIVE_RESULT_TIMEOUT = 2.0
-    AVERAGE_COUNT = 10
-    STATUS_TEXT = {"missing": "未检测到", "unreadable": "无法读数", "error": "处理出错"}
 
     def __init__(self, root, args, output_root, model_path, reader_factory):
+        from gauge_exp16_stability import BATCH_SIZE, MAX_BATCH_SIZE, StabilityBatch
+
         self.root, self.args = root, args
+        self._batch_size = BATCH_SIZE
+        self._max_batch_size = MAX_BATCH_SIZE
+        self._new_batch = StabilityBatch
+        self._batch = self._new_batch()
+        self._last_batch = None
+        self._round = 1
+        self._reported = {}  # 已显示的值保持不变，续采只处理仍无结果的表。
         self.output_root = output_root / "仪表识别测试_Exp16"
         self.model_path = model_path
         self._reader_factory = reader_factory
@@ -3629,25 +3634,33 @@ class Exp16GaugeApp:
         self.status_var = tk.StringVar(master=root, value="请选择摄像头或打开一张原始照片。")
         self.temp_var = tk.StringVar(master=root, value="温度：--")
         self.humidity_var = tk.StringVar(master=root, value="湿度：--")
-        self.temp_average_var = tk.StringVar(master=root)
-        self.humidity_average_var = tk.StringVar(master=root)
-        self._temp_samples = deque(maxlen=self.AVERAGE_COUNT)
-        self._humidity_samples = deque(maxlen=self.AVERAGE_COUNT)
-        self._update_averages()
+        self.progress_var = tk.StringVar(master=root, value="未开始测量")
+        self.temp_auto_ring_var = tk.BooleanVar(master=root, value=args.gauge_exp16_temp_auto_ring)
+        self.humidity_auto_scale_var = tk.BooleanVar(master=root, value=args.gauge_exp16_humidity_auto_scale)
         self._bold_font = tkfont.Font(root=root, size=12, weight="bold")
 
         primary, content = _workspace(
             self, "仪表识别测试 · Exp16", "YOLO + OpenCV",
-            "显示处理后的同一帧图像与即时读数；S 保存测试样本，Esc 退出。")
-        _action(primary, "连接摄像头", self.choose_camera, primary=True)
+            "保持同一表盘和相机静止；未读到的表会自动继续采样。\n"
+            "重新测量可清空结果；S 保存测试样本，Esc 退出。")
+        self.measure_button = _action(
+            primary, "重新测量", self.measure_again, primary=True, state="disabled")
+        _action(primary, "连接摄像头", self.choose_camera)
         _action(primary, "打开图片", self.choose_image)
         self.save_button = _action(primary, "保存测试样本 (S)", self.save_sample, state="disabled")
-        stats = _section(content, "当前帧读数")
+        self.temp_mode_button = ttk.Checkbutton(
+            primary, text="温度自动找环（实验）", variable=self.temp_auto_ring_var,
+            command=lambda: self._change_algorithm("温度", "自动找环", self.temp_auto_ring_var.get()))
+        self.temp_mode_button.pack(anchor="w", pady=(2, 0))
+        self.humidity_mode_button = ttk.Checkbutton(
+            primary, text="湿度自动找刻度（实验）", variable=self.humidity_auto_scale_var,
+            command=lambda: self._change_algorithm("湿度", "自动找刻度", self.humidity_auto_scale_var.get()))
+        self.humidity_mode_button.pack(anchor="w", pady=(2, 0))
+        stats = _section(content, "本次读数")
+        ttk.Label(stats, textvariable=self.progress_var, wraplength=210).pack(anchor="w", pady=(0, 6))
         for var in (self.temp_var, self.humidity_var):
-            ttk.Label(stats, textvariable=var, font=self._bold_font).pack(anchor="w", pady=(0, 5))
-        averages = _section(content, "最近 {} 次有效读数平均".format(self.AVERAGE_COUNT))
-        for var in (self.temp_average_var, self.humidity_average_var):
-            ttk.Label(averages, textvariable=var, font=self._bold_font).pack(anchor="w", pady=(0, 5))
+            ttk.Label(stats, textvariable=var, font=self._bold_font,
+                      wraplength=210).pack(anchor="w", pady=(0, 5))
         ttk.Label(_section(content, "测试模型"), text=model_path.name,
                   wraplength=210).pack(anchor="w")
         self.preview.clear("等待图像输入")
@@ -3666,6 +3679,10 @@ class Exp16GaugeApp:
         if dialog.result:
             self.open_camera(dialog.result)
 
+    def measure_again(self):
+        if self._camera is not None:
+            self.open_camera(self._source)
+
     def open_camera(self, source):
         self._reset_source("正在连接摄像头…")
         options = argparse.Namespace(**vars(self.args))
@@ -3681,7 +3698,9 @@ class Exp16GaugeApp:
             return
         self._camera, self._source = camera, str(source)
         self.args.device = source
-        self.status_var.set("已连接 {} · {}×{}，等待读数…".format(source, *camera.frame_size))
+        self.measure_button.configure(state="normal")
+        self.progress_var.set("采样 0/{}，请保持静止".format(self._batch_size))
+        self.status_var.set("已连接 {} · {}×{}，开始测量…".format(source, *camera.frame_size))
 
     def choose_image(self):
         path = filedialog.askopenfilename(
@@ -3698,32 +3717,57 @@ class Exp16GaugeApp:
             return
         self._reset_source("正在处理图片…")
         self._source, self._pending_image = path, frame
+        self.progress_var.set("单图检查，不产生稳定读数")
         self.status_var.set("正在读取 {}…".format(Path(path).name))
 
-    def _clear_result(self, text):
-        self._result = None
-        self.temp_var.set("温度：--")
-        self.humidity_var.set("湿度：--")
-        self.save_button.configure(state="disabled")
-        self.preview.clear(text)
-
     def _reset_source(self, text):
-        self._generation += 1  # 丢弃切换来源前尚未完成的结果。
         if self._camera is not None:
             self._camera.release()
         self._camera = self._pending_image = None
-        self._next_submit = 0.0
         self._source = ""
-        self._temp_samples.clear()
-        self._humidity_samples.clear()
-        self._update_averages()
-        self._clear_result(text)
+        self.measure_button.configure(state="disabled")
+        self._reset_measurement(text)
+
+    def _reset_measurement(self, text):
+        self._generation += 1  # 丢弃切换输入或算法前尚未完成的推理。
+        self._next_submit = 0.0
+        self._batch = self._new_batch()
+        self._last_batch = self._result = None
+        self._round = 1
+        self._reported.clear()
+        self.temp_var.set("温度：--")
+        self.humidity_var.set("湿度：--")
+        self.progress_var.set("未开始测量")
+        self.save_button.configure(state="disabled")
+        self.preview.clear(text)
         self.status_var.set(text)
 
-    def _process(self, frame):
+    def _change_algorithm(self, dial, experiment, enabled):
+        photo = None
+        if self._camera is None:
+            if self._pending_image is not None:
+                photo = self._pending_image
+            elif self._result is not None:
+                photo = self._result[0]
+            elif self._job is not None and self._job[1] == self._generation:
+                photo = self._job[2]
+        mode = "{}（实验）".format(experiment) if enabled else "交接版"
+        self._reset_measurement("{}算法已切换为{}".format(dial, mode))
+        if self._camera is not None:
+            self.progress_var.set("采样 0/{}，请保持静止".format(self._batch_size))
+        elif photo is not None:
+            self._pending_image = photo
+            self.progress_var.set("单图检查，不产生稳定读数")
+
+    def _process(self, frame, temp_auto_ring, humidity_auto_scale=False):
         if self._reader is None:
             self._reader = self._reader_factory(self.model_path, device=self.args.infer_device)
-        return self._reader.process(frame)
+        options = {}
+        if temp_auto_ring:
+            options["temp_auto_ring"] = True
+        if humidity_auto_scale:
+            options["humidity_auto_scale"] = True
+        return self._reader.process(frame, **options)
 
     def _tick(self):
         if self._closed:
@@ -3739,11 +3783,8 @@ class Exp16GaugeApp:
                     except Exception as error:
                         self._reset_source("Exp16 运行失败")
                         self.status_var.set("Exp16 运行失败：{}".format(str(error)[:240]))
-        if self._camera is not None:
-            if self._result is not None and now - self._result[3] > self.LIVE_RESULT_TIMEOUT:
-                self._clear_result("等待新的识别结果…")
-                self.status_var.set("读数已过期，等待下一帧…")
-            # 继续取最新画面；上一帧未算完时直接丢帧，不缓存。
+        if self._camera is not None and len(self._reported) < 2:
+            # 只取最新画面，不缓存；两表都有读数时才结束采样。
             try:
                 frame = self._camera.read()
             except cv2.error:
@@ -3758,41 +3799,77 @@ class Exp16GaugeApp:
         self._after_id = self.root.after(self.POLL_MS, self._tick)
 
     def _submit(self, frame, now):
-        self._job = (self._worker.submit(self._process, frame), self._generation, frame,
-                     now, datetime.now().astimezone().isoformat(timespec="milliseconds"))
+        # Tk 变量只在主线程读取；旧任务附带旧算法和来源代数。
+        auto_ring = self.temp_auto_ring_var.get()
+        auto_scale = self.humidity_auto_scale_var.get()
+        self._job = (self._worker.submit(self._process, frame, auto_ring, auto_scale),
+                     self._generation, frame, now,
+                     datetime.now().astimezone().isoformat(timespec="milliseconds"))
         self._next_submit = now + self.PROCESS_INTERVAL
 
-    @classmethod
-    def _reading_text(cls, title, unit, reading):
-        if reading.value is None:
-            return "{}：--（{}）".format(title, cls.STATUS_TEXT.get(reading.status, reading.status))
-        return "{}：{:.1f} {}".format(title, reading.value, unit)
-
-    def _update_averages(self, result=None):
-        for title, unit, samples, label, reading in (
-            ("温度", "°C", self._temp_samples, self.temp_average_var,
-             result.temperature if result is not None else None),
-            ("湿度", "%RH", self._humidity_samples, self.humidity_average_var,
-             result.humidity if result is not None else None),
+    def _finish_round(self, measured):
+        self._last_batch = measured
+        for key, title, unit, label in (
+            ("temperature", "温度", "°C", self.temp_var),
+            ("humidity", "湿度", "%RH", self.humidity_var),
         ):
-            if reading is not None and reading.status == "ok" and reading.value is not None:
-                samples.append(reading.value)
-            count = len(samples)
-            if count == self.AVERAGE_COUNT:
-                label.set("{}：{:.1f} {}".format(title, sum(samples) / count, unit))
+            if key in self._reported:
+                continue
+            reading = getattr(measured, key)
+            if reading.value is None:
+                reason = "无有效读数" if reading.valid_count == 0 else "一致数据不足"
+                label.set("{}：--（{}，续采中）".format(title, reason))
             else:
-                label.set("{}：--（{}/{}）".format(title, count, self.AVERAGE_COUNT))
+                notice = "（低可信参考）" if reading.status == "reference" else ""
+                label.set("{}：{:.1f} {}{}".format(title, reading.value, unit, notice))
+                self._reported[key] = dict(reading.as_dict(), round=self._round)
+
+        if len(self._reported) == 2:
+            self.progress_var.set("测量结束 · 第 {} 轮 {} 帧".format(self._round, measured.frame_count))
+        else:
+            self._round += 1
+            self._batch = self._new_batch(collect_temperature="temperature" not in self._reported,
+                                          collect_humidity="humidity" not in self._reported)
+            self.progress_var.set("本轮未读齐，自动开始第 {} 轮".format(self._round))
 
     def _show_result(self, frame, result, captured_at, elapsed):
-        image = Image.fromarray(cv2.cvtColor(result.annotated, cv2.COLOR_BGR2RGB))
-        photo = self.preview.fit_image(image)
-        self.preview.configure(image=photo, text="")
-        self._result = (frame, result, captured_at, time.monotonic())
-        self.temp_var.set(self._reading_text("温度", "°C", result.temperature))
-        self.humidity_var.set(self._reading_text("湿度", "%RH", result.humidity))
-        self._update_averages(result)
-        self.save_button.configure(state="normal")
-        summary = "{} · {}×{} · 处理约 {:.0f} ms".format(
+        # 预览只画定位框，避免单帧噪声作为实时数值露出；保存仍保留原始诊断叠图。
+        preview = frame.copy()
+        for reading, label, color in (
+            (result.temperature, "T", (0, 255, 0)),
+            (result.humidity, "RH", (255, 255, 0)),
+        ):
+            if reading.bbox is not None:
+                x1, y1, x2, y2 = reading.bbox
+                cv2.rectangle(preview, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(preview, label, (x1, max(16, y1 - 4)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+        image = Image.fromarray(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB))
+        self.preview.configure(image=self.preview.fit_image(image), text="")
+
+        measured = None
+        if self._camera is not None:
+            temp, hum = result.temperature, result.humidity
+            measured = self._batch.add(
+                temp.value if temp.status == "ok" else None,
+                hum.value if hum.status == "ok" else None)
+            if measured is not None:
+                self._finish_round(measured)
+            elif self._batch.count >= self._batch_size:
+                counts = (("temperature", "温度", self._batch.temperature_valid_count),
+                          ("humidity", "湿度", self._batch.humidity_valid_count))
+                detail = "，".join("{}有效 {}".format(title, count)
+                                  for key, title, count in counts if key not in self._reported)
+                self.progress_var.set("第 {} 轮补采 {}/{} 帧 · {}".format(
+                    self._round, self._batch.count, self._max_batch_size, detail))
+            else:
+                self.progress_var.set("第 {} 轮采样 {}/{}，请保持静止".format(
+                    self._round, self._batch.count, self._batch_size))
+        if self._camera is None or measured is not None:
+            self._result = (frame, result, captured_at)
+            self.save_button.configure(state="normal")
+
+        summary = "{} · {}×{} · 单帧处理约 {:.0f} ms".format(
             Path(self._source).name, frame.shape[1], frame.shape[0], elapsed * 1000)
         errors = [reading.detail for reading in (result.temperature, result.humidity)
                   if reading.status == "error" and reading.detail]
@@ -3801,19 +3878,22 @@ class Exp16GaugeApp:
     def save_sample(self):
         if self._result is None:
             return
-        frame, result, captured_at, shown_at = self._result
-        if self._camera is not None and time.monotonic() - shown_at > self.LIVE_RESULT_TIMEOUT:
-            self._clear_result("等待新的识别结果…")
-            self.status_var.set("读数已过期，不保存旧帧。")
-            return
+        frame, result, captured_at = self._result
         folder = self.output_root / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         try:
             folder.mkdir(parents=True)
             for filename, bgr in (("raw.png", frame), ("annotated.png", result.annotated)):
                 Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)).save(folder / filename)
             payload = result.as_dict()
-            payload.update({"model": self.model_path.name, "source": self._source,
-                            "captured_at": captured_at, "frame_size": [frame.shape[1], frame.shape[0]]})
+            payload.update({
+                "model": self.model_path.name, "source": self._source,
+                "captured_at": captured_at, "frame_size": [frame.shape[1], frame.shape[0]],
+                "temperature_algorithm": "auto-ring" if self.temp_auto_ring_var.get() else "legacy",
+                "humidity_algorithm": "auto-scale" if self.humidity_auto_scale_var.get() else "legacy",
+            })
+            if self._last_batch is not None:
+                payload["stable_readings"] = self._last_batch.as_dict()
+                payload["displayed_readings"] = self._reported
             (folder / "readings.json").write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
         except (OSError, ValueError, TypeError, cv2.error) as error:
@@ -6956,6 +7036,10 @@ def parse_args(argv=None):
                              "thermal 红外热像，ocr 文字识别")
     parser.add_argument("--gauge-exp16-model", default=None,
                         help="仅 Exp16 测试模式使用：指定可信交接包中的 best.pt")
+    parser.add_argument("--gauge-exp16-temp-auto-ring", action="store_true",
+                        help="进入 Exp16 时启用实验性的温度自动找环（默认关闭，可在界面切换）")
+    parser.add_argument("--gauge-exp16-humidity-auto-scale", action="store_true",
+                        help="进入 Exp16 时启用实验性的湿度自动找刻度（默认关闭，可在界面切换）")
     parser.add_argument("-d", "--output-dir", default=str(DEFAULT_OUTPUT_DIR),
                         help="照片根目录（默认：~/Pictures/photo_capture）")
     parser.add_argument("-t", "--type", default=None,

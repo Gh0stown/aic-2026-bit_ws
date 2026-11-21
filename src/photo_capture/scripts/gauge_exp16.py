@@ -86,20 +86,21 @@ def _select_boxes(result, width, height, minimum_confidence):
     return selected
 
 
-def _read_crop(frame, detection, read, limits):
+def _read_crop(frame, detection, read, limits, *, jpeg_roundtrip=True):
     if detection is None:
         return GaugeReading("missing"), None
     bbox, confidence = detection
     x1, y1, x2, y2 = bbox
     try:
-        # The handoff thresholded decoded JPEG ROIs at native camera scale.
-        # Reproduce the codec roundtrip without a temporary file or resize.
-        ok, jpeg = cv2.imencode(".jpg", frame[y1 : y2 + 1, x1 : x2 + 1])
-        if not ok:
-            raise RuntimeError("could not encode gauge crop")
-        crop = cv2.imdecode(jpeg, cv2.IMREAD_COLOR)
-        if crop is None:
-            raise RuntimeError("could not decode gauge crop")
+        crop = frame[y1 : y2 + 1, x1 : x2 + 1]
+        if jpeg_roundtrip:
+            # Keep the handoff's preprocessing on both default readout paths.
+            ok, jpeg = cv2.imencode(".jpg", crop)
+            if not ok:
+                raise RuntimeError("could not encode gauge crop")
+            crop = cv2.imdecode(jpeg, cv2.IMREAD_COLOR)
+            if crop is None:
+                raise RuntimeError("could not decode gauge crop")
         measurement = read(crop)
         value = float(measurement.value)
         if not limits[0] <= value <= limits[1]:
@@ -116,7 +117,7 @@ def _read_crop(frame, detection, read, limits):
     )
 
 
-def _annotate(output, label, unit, color, reading, measurement):
+def _annotate(output, label, unit, color, reading, measurement, *, observed_radius=False):
     if reading.bbox is None:
         return
     x1, y1, x2, y2 = reading.bbox
@@ -125,7 +126,9 @@ def _annotate(output, label, unit, color, reading, measurement):
         roi = output[y1 : y2 + 1, x1 : x2 + 1]
         cx, cy = measurement.center
         angle = math.radians(measurement.angle)
-        radius = measurement.radius * (0.88 if label == "T" else 0.98)
+        radius = measurement.radius
+        if not observed_radius:
+            radius *= 0.88 if label == "T" else 0.98
         tip = (round(cx + radius * math.cos(angle)), round(cy - radius * math.sin(angle)))
         cv2.arrowedLine(roi, (cx, cy), tip, (0, 0, 255), 2, cv2.LINE_AA, tipLength=0.08)
     cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
@@ -172,8 +175,8 @@ class Exp16Reader:
                 raise ValueError("Exp16 weights must contain both `wendu` and `shidu` classes")
         self.model = model
 
-    def process(self, frame):
-        """Return readings and a BGR overlay on a copy of this exact frame."""
+    def process(self, frame, *, temp_auto_ring=False, humidity_auto_scale=False):
+        """Read the same frame with independently selectable algorithms per dial."""
         if (not isinstance(frame, np.ndarray) or frame.dtype != np.uint8 or
                 frame.ndim != 3 or frame.shape[2] != 3 or frame.size == 0):
             raise ValueError("Exp16Reader.process expects a nonempty uint8 BGR image")
@@ -189,8 +192,26 @@ class Exp16Reader:
             error = GaugeReading("error", detail="{}: {}".format(type(exc).__name__, exc))
             return Exp16Result(output, error, error)
 
-        temperature, temp_geometry = _read_crop(frame, selected.get("wendu"), read_temperature, (TEMP_MIN, TEMP_MAX))
-        humidity, humidity_geometry = _read_crop(frame, selected.get("shidu"), read_humidity, (0.0, 100.0))
-        _annotate(output, "T", " C", (0, 255, 0), temperature, temp_geometry)
-        _annotate(output, "RH", "%", (255, 255, 0), humidity, humidity_geometry)
+        if temp_auto_ring:
+            from gauge_exp16_vendor.read_temperature_auto_ring import read_temperature_auto_ring
+
+            temperature, temp_geometry = _read_crop(
+                frame, selected.get("wendu"), read_temperature_auto_ring,
+                (-30.0, 50.0), jpeg_roundtrip=False)  # 完整印刷刻度，含两个端点。
+        else:
+            temperature, temp_geometry = _read_crop(
+                frame, selected.get("wendu"), read_temperature, (TEMP_MIN, TEMP_MAX))
+        if humidity_auto_scale:
+            from gauge_exp16_vendor.read_humidity_auto_scale import read_humidity_auto_scale
+
+            humidity, humidity_geometry = _read_crop(
+                frame, selected.get("shidu"), read_humidity_auto_scale,
+                (0.0, 100.0), jpeg_roundtrip=False)
+        else:
+            humidity, humidity_geometry = _read_crop(
+                frame, selected.get("shidu"), read_humidity, (0.0, 100.0))
+        _annotate(output, "T", " C", (0, 255, 0), temperature, temp_geometry,
+                  observed_radius=temp_auto_ring)
+        _annotate(output, "RH", "%", (255, 255, 0), humidity, humidity_geometry,
+                  observed_radius=humidity_auto_scale)
         return Exp16Result(output, temperature, humidity)
