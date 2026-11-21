@@ -8,6 +8,7 @@ catkin_package()
 catkin_install_python(PROGRAMS
   scripts/capture_photos.py
   scripts/count_video.py
+  scripts/inspection_vision.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
@@ -22,6 +23,14 @@ install(FILES
   scripts/thermal_calibration.py
   scripts/building_windows.py
   scripts/ocr_engine.py
+  scripts/iv_common.py
+  scripts/iv_service.py
+  scripts/iv_tasks_detect.py
+  scripts/iv_tasks_trash.py
+  scripts/iv_tasks_ebike.py
+  scripts/iv_tasks_ocr.py
+  scripts/iv_tasks_thermal.py
+  scripts/iv_tasks_meter.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
@@ -33,4 +42,9 @@ install(DIRECTORY scripts/gauge_exp16_vendor/
 install(FILES models/gauge_exp16.pt
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
   OPTIONAL
+)
+
+install(DIRECTORY config/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
+  FILES_MATCHING PATTERN "*.yaml"
 )

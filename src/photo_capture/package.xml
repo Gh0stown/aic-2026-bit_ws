@@ -17,6 +17,11 @@
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>mlx90640_ros</exec_depend>
+  <!-- inspection_vision 节点用 nav_demo 的 InspectionVision.srv 提供服务 -->
+  <exec_depend>nav_demo</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <export />
 </package>

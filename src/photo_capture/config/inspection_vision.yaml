@@ -1,0 +1,159 @@
+# /inspection_vision 视觉服务节点配置
+#
+# 修改后不需要重新编译；节点每次启动读取本文件。
+# 现场只改这里，不要把模型路径、阈值写进代码。
+#
+# 说明：
+# - 模型路径写相对路径时按 models.dir 解析，也可以写绝对路径；
+# - timeouts 是“本次请求允许的总秒数”，导航也可以在 params.deadline 里覆盖；
+# - 红绿灯不进裁判、crowd/ebike 的街区内汇总由导航做，本节点只返回当前视角计数。
+
+camera:
+  # 0 / /dev/video0 / 图片目录 / 视频文件（图片、视频只用于离线自测）
+  # 默认按 Fic760x 原生 2592x1944@15 取流（车牌/仪表 ROI 需要高分辨率）；
+  # 相机不支持时会自动协商到最接近的分辨率。
+  device: 0
+  width: 2592
+  height: 1944
+  fps: 15
+  pixel_format: mjpg      # mjpg / yuyv / auto
+  mirror: false
+  sharpness: 32
+  read_warmup: 2
+
+output:
+  dir: ~/Pictures/inspection_2026
+  jpeg_quality: 95
+  save_raw: true
+
+models:
+  dir: ~/AI视觉
+  crowd: people.pt          # people / bad / cycle
+  sign: Signal.pt           # A / B
+  sign_confirm: stop.pt     # 单类“禁止通行标志”，只作有没有牌的独立复核
+  sign_alt: 模型/jinzhi.pt  # nogo，v8m 较慢，仅 sign.accept_alt_model 打开时使用
+  light: light.pt           # 红灯 / 黄灯 / 绿灯
+  trash_bins: trash_brest.pt        # 4 类 x 开/关，共 8 类
+  # trash_items 二选一：
+  #   trash.pt   24 类纯数字 1..24（2026 新训），中文名与四分类映射在代码 TRASH24_MAP；
+  #   catalog.pt 36 类中文名（2025 旧模型，类名自带“可回收垃圾-塑料瓶”前缀）。
+  # trash.pt 24 类 → 四分类：1-6 厨余垃圾，7-12 可回收物，13-18 其他垃圾，19-24 有害垃圾。
+  trash_items: trash.pt
+  fire: fire.pt             # 火源
+  nameplate: house.pt       # 单类，裁楼宇名牌
+  plate: plate.pt           # 单类 plate
+  bike_state: best.pt       # 2025 模型（倒伏/正常），2026 实拍会误判，默认改用 bike_count
+  bike_count: Cycle.pt      # UP=正常 / DOWN=倒伏，2026 实拍更准；停车区单帧和视频计数都用它
+  gauge_exp16: ""           # 空 = <package>/models/gauge_exp16.pt
+
+thresholds:
+  default_conf: 0.25
+  crowd: 0.25
+  light: 0.45
+  sign: 0.60
+  trash_bins: 0.30
+  trash_items: 0.20
+  fire: 0.25
+  nameplate: 0.35
+  plate: 0.35
+  ebike: 0.30
+
+# 导航同步调用；这些是节点自己执行的截止时间，超时返回 success=false。
+timeouts:
+  default: 6.0
+  crowd: 6.0
+  sign: 6.0
+  light: 3.0
+  trash: 8.0
+  fire: 8.0
+  plate: 8.0
+  temperature: 8.0
+  meter: 15.0
+  ebike: 8.0
+  ebike_pan: 150.0
+
+# 默认连拍帧数（params.frames 可覆盖）
+frames:
+  default: 2
+  crowd: 2
+  sign: 3
+  light: 3
+  trash: 2
+  fire: 2
+  plate: 2
+  temperature: 2
+  ebike: 2
+
+sign:
+  # A=正面 -> left，B=侧面 -> straight（暂定，需实测确认；现场摆两种位置各验一次）
+  route_map:
+    A: left
+    B: straight
+  # 主用 Signal.pt 判 A/B；再跑一次 stop.pt 复核“有没有牌”
+  use_confirm_model: true
+  accept_alt_model: false
+
+crowd:
+  # people.pt 三类：people=社区人员，bad=非社区人员，cycle=电动车。
+  # 实测 cycle 会在人偶立牌上误检，所以 crowd 只统计人，不把 cycle 写进人数；
+  # 街区违停单独由 task=ebike 用 best.pt 判断。
+  classes: [people, bad]
+
+trash:
+  bins_per_frame: 4
+  # 桶内垃圾置信度低于该值时，再对该桶裁图补检一次（小目标在裁图里更稳）
+  crop_recheck_below: 0.5
+  # 可选：覆盖 24 类映射，键是模型类名，值是 [四分类, 播报名]
+  # item_map:
+  #   "1": ["厨余", "果核"]
+  #   "7": ["可回收物", "塑料瓶"]
+
+fire:
+  # OCR 识别不到名牌时的兜底播报名（楼宇名以候选名单模糊匹配为准）
+  buildings:
+    "7": {name: A, candidates: []}
+    "8": {name: C, candidates: []}
+    "17": {name: B, candidates: []}
+
+plate:
+  ocr_mode: generic         # generic（沙盘牌）/ hyperlpr（会改写首字为省份）
+  text_pattern: ""          # 可选正则，例如 "^[学宁苏]R·?\\d{5}$"；空 = 不校验
+
+thermal:
+  # MLX90640：实机串口或 capture.bin 回放（离线自测），两者只能设一个
+  port: /dev/thermal
+  capture: ""
+  # 播报名（handoff 里的 XX 大厦）；楼宇 D 目前固定为 D
+  building: D
+  # 楼宇 D 判层只用红外 + 本楼层表；building_d.pt 是楼体四角 pose 模型，当前不参与判层。
+  # 行号 -> 楼层；行号从图像顶部数（0=顶部）。默认四层等分，现场必须按实际标定重录
+  floor_table: "4F:0-5,3F:6-11,2F:12-17,1F:18-23"
+  delta: 2.0
+  scale: 12
+  # 伪彩固定色标（只影响颜色，不影响温度值）
+  tmin: 20.0
+  tmax: 35.0
+  capture_timeout: 3.0
+
+meter:
+  # 空 = src/photo_capture/models/gauge_exp16.pt（SHA256 见 docs/gauge_exp16_navigation_handoff.md）
+  model: ""
+  temp_auto_ring: true
+  humidity_auto_scale: false
+  min_frames: 10
+  max_frames: 20
+  frame_interval: 0.12
+  sha256: "5415e9abcc92ad1d5c0e62a380d861c51bb2a4931edaa0f55099b7134d824cc3"
+
+ebike:
+  # 街区违停：默认 crowd（people.pt 的 cycle 类，2026 街区实拍能认出电动车）；
+  # 可选 street_model: best（best.pt）或 cycle（Cycle.pt 的 UP/DOWN）。
+  # 每方向只报 0/1，不累加多视角。
+  street_model: crowd
+  street_classes: []
+  # 停车区：params.pan=true 时录 duration 秒视频交给 count_video 跟踪计数；
+  # 平移由导航侧完成（节点不发布 /cmd_vel），周期内保持画面连续。
+  parking_pan:
+    duration: 8.0
+    fps: 15
+    min_frames: 5
