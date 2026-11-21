@@ -1,0 +1,19 @@
+# 统一视觉识别服务：一次调用做一件事，返回播报文本和带框图片路径。
+#
+# task 取值：
+#   crowd / sign / trash / fire / plate / temperature / meter / ebike / light
+#   light 不上报裁判，只用于导航等灯。
+#
+# params 可选 JSON，例如：
+#   {"frames": 3}          连拍帧数
+#   {"pan": true}          17->18 平移视频流识别
+#   {"timeout": 40.0}      等灯/长时间任务超时
+string task
+int32 point_id
+string sub_id
+string params
+---
+bool success
+string result
+string extra
+string[] images

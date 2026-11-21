@@ -33,6 +33,7 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if THIS_DIR not in sys.path:
     sys.path.insert(0, THIS_DIR)
 
+import vision_tasks
 from cruise_waypoints import (  # noqa: E402
     DEFAULT_POINTS, DEFAULT_ROUTES, DEFAULT_STRAFE_IDS,
     angle_diff, build_plan, is_strafe_leg, lateral_delta, load_yaml,
@@ -216,7 +217,8 @@ class CruiseWorker(threading.Thread):
                  log_fn, on_status, pose_get=None, base_frame='base_footprint',
                  run_timer=None, drive_long=DRIVE_SPEED_LONG,
                  drive_mid=DRIVE_SPEED_MID, drive_short=DRIVE_SPEED_SHORT,
-                 rot_speed=1.00, reverse_speed=0.30, strafe_opt=True):
+                 rot_speed=1.00, reverse_speed=0.30, strafe_opt=True,
+                 judge=None, auto_report=True):
         super(CruiseWorker, self).__init__(daemon=True)
         self.plan = plan
         self.dwell = dwell
@@ -228,6 +230,10 @@ class CruiseWorker(threading.Thread):
         self.rot_speed = max(0.20, min(1.00, float(rot_speed)))
         self.reverse_speed = max(0.05, min(0.30, float(reverse_speed)))
         self.strafe_opt = bool(strafe_opt)
+        self.judge = judge
+        self.auto_report = bool(auto_report)
+        self.results = []
+        self._vision = None
         self.map_frame = map_frame
         self.base_frame = base_frame
         self.log_fn = log_fn
@@ -582,6 +588,85 @@ class CruiseWorker(threading.Thread):
         finally:
             self._stop_motion()
 
+    def _ensure_vision(self):
+        if self._vision is not None:
+            return True
+        try:
+            import rospy
+            from nav_demo.srv import InspectionVision
+            rospy.wait_for_service('/inspection_vision', timeout=1.0)
+            self._vision = rospy.ServiceProxy('/inspection_vision', InspectionVision)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.log('  视觉服务 /inspection_vision 不可用：%s' % exc)
+            return False
+
+    def _call_vision(self, step, task, sub_id):
+        from nav_demo.srv import InspectionVisionRequest
+        req = InspectionVisionRequest()
+        req.task = task
+        req.point_id = int(step['id'])
+        req.sub_id = sub_id
+        req.params = '{}'
+        return self._vision(req)
+
+    def _recognize(self, step, name):
+        info = vision_tasks.lookup(name)
+        if info is None:
+            self.log('  识别：%s（没有配置视觉任务）' % name)
+            return
+        task, sub_id = info
+        if not self._ensure_vision():
+            return
+        if task == 'light':
+            self._recognize_light(step, name, sub_id)
+            return
+        try:
+            resp = self._call_vision(step, task, sub_id)
+        except Exception as exc:  # noqa: BLE001
+            self.log('  识别 %s 失败：%s' % (name, exc))
+            return
+        if not resp.success:
+            self.log('  识别 %s 未成功：%s' % (name, resp.result or resp.extra))
+            return
+        self.log('  识别：%s → %s' % (name, resp.result))
+        self.results.append({'task': task, 'sub_id': sub_id,
+                             'result': resp.result, 'extra': resp.extra,
+                             'images': list(resp.images)})
+        if task == 'sign':
+            self._sign_route(resp.result)
+
+    def _recognize_light(self, step, name, sub_id):
+        deadline = time.monotonic() + 45.0
+        while not self._stop_evt.is_set() and time.monotonic() < deadline:
+            try:
+                resp = self._call_vision(step, 'light', sub_id)
+            except Exception as exc:  # noqa: BLE001
+                self.log('  红绿灯识别失败：%s' % exc)
+                return
+            color = resp.result if resp.success else (resp.result or resp.extra)
+            self.log('  识别：%s → %s' % (name, color))
+            if resp.success and vision_tasks.is_green(color):
+                return
+            self._dwell(0.5)
+        self.log('  红绿灯等待超时，按当前状态继续')
+
+    def _sign_route(self, result):
+        # 正着放=left，反之=straight；Signal.pt A/B 映射待实测
+        self.log('  指示牌：%s（路线切换待实测 A/B 映射）' % result)
+
+    def _report_results(self):
+        if self.judge is None:
+            return
+        if self.auto_report:
+            for item in self.results:
+                try:
+                    self.judge.report(item['task'], item['result'], item['sub_id'],
+                                      item['extra'], item['images'])
+                except Exception as exc:  # noqa: BLE001
+                    self.log('  裁判上报排队失败：%s' % exc)
+        self.judge.close(wait=True)
+
     def _dwell(self, seconds):
         end = time.monotonic() + seconds
         while not self._stop_evt.is_set():
@@ -764,6 +849,7 @@ class CruiseWorker(threading.Thread):
                     if self._rotate_to(yaw, name):
                         last_yaw = yaw
                         self._dwell(self.dwell)
+                        self._recognize(step, name)
                     elif not self._stop_evt.is_set():
                         self.log('  转向 %s 失败' % name)
 
@@ -788,6 +874,7 @@ class CruiseWorker(threading.Thread):
         finally:
             self._cancel_all()
             self._stop_motion()
+            self._report_results()
 
     def _odom_cb(self, msg):
         p = msg.pose.pose
@@ -827,6 +914,10 @@ class App(object):
         self.pose_tracker = None
         self.current_id = None
         self.run_timer = None
+        self.judge = None
+        self._image_paths = []
+        self._image_shown = 0
+        self._image_photo = None
 
         self.log_path = os.path.join(
             os.path.dirname(DEFAULT_POINTS),
@@ -994,14 +1085,45 @@ class App(object):
                         textvariable=var).pack(side='left')
         self.advanced_frame.grid_remove()
 
-        body = ttk.Panedwindow(self.root, orient='horizontal')
-        body.pack(fill='both', expand=True, padx=14, pady=12)
+        judge_card = ttk.Frame(self.root, style='Card.TFrame', padding=(16, 8))
+        judge_card.pack(fill='x', padx=14, pady=(8, 0))
+        ttk.Label(judge_card, text='裁判 / 视觉', style='Section.TLabel').pack(side='left')
+        ttk.Label(judge_card, text='地址', style='Muted.TLabel').pack(side='left', padx=(16, 4))
+        self.judge_url_var = tk.StringVar(value='http://127.0.0.1:8080')
+        ttk.Entry(judge_card, textvariable=self.judge_url_var, width=30).pack(side='left')
+        ttk.Label(judge_card, text='队名', style='Muted.TLabel').pack(side='left', padx=(10, 4))
+        self.judge_team_var = tk.StringVar()
+        ttk.Entry(judge_card, textvariable=self.judge_team_var, width=16).pack(side='left')
+        ttk.Button(judge_card, text='连通测试', command=self.connect_judge).pack(side='left', padx=8)
+        self.auto_report_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(judge_card, text='结束自动上报', variable=self.auto_report_var).pack(side='left', padx=8)
+        ttk.Button(judge_card, text='启动视觉', command=self.start_vision).pack(side='left', padx=4)
+        ttk.Button(judge_card, text='最小化', command=self.minimize).pack(side='left', padx=4)
+
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill='both', expand=True, padx=14, pady=12)
+        nav_tab = ttk.Frame(self.notebook)
+        self.notebook.add(nav_tab, text='导航')
+        body = ttk.Panedwindow(nav_tab, orient='horizontal')
+        body.pack(fill='both', expand=True)
         left = ttk.Frame(body, style='Card.TFrame', padding=14)
         right = ttk.Frame(body)
         body.add(left, weight=6)
         body.add(right, weight=5)
         # 给右侧足够的初始宽度；之后可拖动分隔线改变地图/控制台比例。
         self.root.after_idle(lambda: body.sashpos(0, int(width * 0.51)))
+
+        img_tab = ttk.Frame(self.notebook, style='Card.TFrame', padding=10)
+        self.notebook.add(img_tab, text='识别图像（带框）')
+        self.image_list = tk.Listbox(img_tab, width=34, font=(self.ui_font, 9))
+        self.image_list.pack(side='left', fill='y')
+        self.image_list.bind('<<ListboxSelect>>', self._on_image_select)
+        img_right = ttk.Frame(img_tab, style='Card.TFrame')
+        img_right.pack(side='left', fill='both', expand=True, padx=(10, 0))
+        self.image_canvas = tk.Canvas(img_right, background='#eef3f8', highlightthickness=0)
+        self.image_canvas.pack(fill='both', expand=True)
+        self.image_info = tk.StringVar(value='暂无识别图像')
+        ttk.Label(img_right, textvariable=self.image_info, style='Muted.TLabel').pack(anchor='w', pady=(4, 0))
 
         map_header = ttk.Frame(left, style='Card.TFrame')
         map_header.pack(fill='x', pady=(0, 10))
@@ -1317,7 +1439,52 @@ class App(object):
         if not self.calibrating and str(self.cal_btn['state']) == 'disabled':
             self.cal_btn.configure(state='normal')
         self._update_dashboard()
+        self._update_images()
         self.root.after(200, self._poll)
+
+    def _update_images(self):
+        if self.worker is None:
+            return
+        results = list(self.worker.results)
+        while self._image_shown < len(results):
+            item = results[self._image_shown]
+            self._image_shown += 1
+            for path in item.get('images', []):
+                if not path:
+                    continue
+                self._image_paths.append((item.get('sub_id') or item.get('task', ''), path))
+                self.image_list.insert('end', '%s  %s' % (
+                    self._image_paths[-1][0], os.path.basename(path)))
+        if self._image_paths and self.notebook.index(self.notebook.select()) == 1:
+            if not self.image_list.curselection():
+                self.image_list.selection_set(self.image_list.size() - 1)
+                self._show_image(self._image_paths[-1][1])
+
+    def _on_image_select(self, _event=None):
+        sel = self.image_list.curselection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if 0 <= idx < len(self._image_paths):
+            self._show_image(self._image_paths[idx][1])
+
+    def _show_image(self, path):
+        from PIL import Image, ImageTk
+        try:
+            img = Image.open(path).convert('RGB')
+        except Exception as exc:  # noqa: BLE001
+            self.image_info.set('打开失败：%s' % exc)
+            return
+        self.image_canvas.update_idletasks()
+        cw = max(200, self.image_canvas.winfo_width())
+        ch = max(200, self.image_canvas.winfo_height())
+        scale = min(cw / float(img.width), ch / float(img.height), 1.0)
+        disp = img.resize((max(1, int(img.width * scale)), max(1, int(img.height * scale))))
+        self._image_photo = ImageTk.PhotoImage(disp)
+        self.image_canvas.delete('all')
+        self.image_canvas.create_image(cw // 2, ch // 2,
+                                       image=self._image_photo, anchor='center')
+        self.image_info.set(path)
 
     def _update_dashboard(self):
         """只读展示 worker 状态，不触发控制或发布消息。"""
@@ -1381,6 +1548,17 @@ class App(object):
                          (self.reverse_speed_var, reverse_speed)):
             var.set('%.2f' % val)
         strafe_opt = not self.route_var.get().endswith('_noopt')
+        judge = None
+        judge_url = self.judge_url_var.get().strip()
+        judge_team = self.judge_team_var.get().strip()
+        if judge_url and judge_team:
+            try:
+                from judge_client import JudgeClient
+                judge = JudgeClient(judge_url, judge_team, log=self._log)
+                self.judge = judge
+            except Exception as exc:  # noqa: BLE001
+                self._log('裁判客户端初始化失败：%s' % exc)
+        auto_report = bool(self.auto_report_var.get())
         self.run_timer = CruiseTimer()
         self.log_file.write('\n===== 开始巡航 %s =====\n'
                             % datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -1391,14 +1569,45 @@ class App(object):
                                    run_timer=self.run_timer,
                                    drive_long=long_speed, drive_mid=mid_speed,
                                    drive_short=short_speed, rot_speed=rot_speed,
-                                   reverse_speed=reverse_speed, strafe_opt=strafe_opt)
+                                   reverse_speed=reverse_speed, strafe_opt=strafe_opt,
+                                   judge=judge, auto_report=auto_report)
         self.worker.start()
         self.start_btn.configure(state='disabled')
         self.pause_btn.configure(state='normal')
         self.stop_btn.configure(state='normal')
         self.resume_btn.configure(state='disabled')
-        self._log('开始巡航：%d 个点，%.1fs 停留，%.2f m/s 平移，平移优化=%s'
-                  % (len(self.plan), dwell, speed, '开' if strafe_opt else '关'))
+        self._log('开始巡航：%d 个点，%.1fs 停留，%.2f m/s 平移，平移优化=%s，自动上报=%s'
+                  % (len(self.plan), dwell, speed, '开' if strafe_opt else '关',
+                     '开' if auto_report else '关'))
+
+    def connect_judge(self):
+        url = self.judge_url_var.get().strip()
+        team = self.judge_team_var.get().strip()
+        if not url or not team:
+            self._log('先填裁判地址和队名')
+            return
+        try:
+            from judge_client import JudgeClient
+            client = JudgeClient(url, team, timeout=2.0, log=self._log)
+            ok, message = client.hello()
+            client.close()
+            self._log('裁判连通测试：%s %s' % ('OK' if ok else '失败', message))
+        except Exception as exc:  # noqa: BLE001
+            self._log('裁判连通测试失败：%s' % exc)
+
+    def start_vision(self):
+        import subprocess
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'start_vision.sh')
+        try:
+            subprocess.Popen(['gnome-terminal', '--', 'bash', '-lc',
+                              '%s; exec bash' % script])
+            self._log('已打开视觉终端：%s' % script)
+        except Exception as exc:  # noqa: BLE001
+            self._log('启动视觉终端失败：%s' % exc)
+
+    def minimize(self):
+        self.root.iconify()
 
     def pause(self):
         if self.worker is not None:
@@ -1609,6 +1818,8 @@ class App(object):
     def on_close(self):
         self.teleop_keys.clear()
         self._teleop_zero()
+        if self.judge is not None:
+            self.judge.close(wait=False)
         if self.worker is not None:
             self.worker.stop()
             self.worker.finish_timing()
