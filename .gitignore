@@ -17,3 +17,6 @@ __pycache__/
 
 # 巡航调试日志
 src/nav_demo/waypoints/cruise_debug_*.log
+
+# Exp16 仪表测试权重由交接包提供，不放入 Git
+/src/photo_capture/models/gauge_exp16.pt

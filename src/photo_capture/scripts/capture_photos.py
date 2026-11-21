@@ -7,7 +7,7 @@
   * 一次拍照可以连拍 N 张（N 随时可改），也可以单张拍；
   * 运行中随时可以切换类型，换类型后自动建对应的文件夹；
   * 启动时可以选择「拍照模式」「模型测试模式」「区域扫描模式」「仪表识别模式」
-    或「红外热像模式」「文字识别模式」；
+    或「红外热像模式」「文字识别模式」「仪表识别测试 · Exp16」；
     模型测试模式会加载 ~/AI视觉 下的 .pt 权重，实时画框显示识别结果；
     区域扫描模式控制麦轮底盘横向平移，逐帧拍摄并拼成横向大图；
     仪表识别模式加载 gauge.pt，识别温度/湿度表的 7 个关键点并计算读数；
@@ -56,6 +56,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -153,6 +155,7 @@ MODE_PHOTO = "photo"
 MODE_DETECT = "detect"
 MODE_SCAN = "scan"
 MODE_GAUGE = "gauge"
+MODE_GAUGE_EXP16 = "gauge-exp16"
 MODE_THERMAL = "thermal"
 MODE_OCR = "ocr"
 
@@ -268,7 +271,7 @@ def apply_gui_camera_defaults(args, mode, device_name) -> None:
     """按设备/模式套用新相机预设；用户显式传的参数优先。"""
     is_fic = "Fic760x" in str(device_name or "")
     if is_fic:
-        if mode in (MODE_PHOTO, MODE_GAUGE, MODE_OCR):
+        if mode in (MODE_PHOTO, MODE_GAUGE, MODE_GAUGE_EXP16, MODE_OCR):
             default_w, default_h, default_fps, default_sharp = 2592, 1944, 15.0, 32
         elif mode in (MODE_DETECT, MODE_SCAN, MODE_THERMAL):
             default_w, default_h, default_fps, default_sharp = 1280, 720, 30.0, 32
@@ -702,6 +705,10 @@ class _CapturePreview(tk.Label if TK_AVAILABLE else object):
         self._display_photo = ImageTk.PhotoImage(image, master=self)
         return self._display_photo
 
+    def clear(self, text):
+        self.configure(image="", text=text)
+        self._source_image = self._display_photo = None
+
     def _fit_on_resize(self, _event=None):
         if self._source_image is not None:
             photo = self.fit_image(self._source_image)
@@ -1096,9 +1103,15 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
                 justify="center", foreground="#b00020", width=16,
             ).grid(row=2, column=1, sticky="nsew")
 
+        self.gauge_exp16_button = ttk.Button(
+            buttons, text="仪表识别测试 · Exp16 (7)",
+            command=lambda: self._choose(MODE_GAUGE_EXP16),
+        )
+        self.gauge_exp16_button.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
         ttk.Label(
             body,
-            text="提示：按数字键 1 / 2 / 3 / 4 / 5 / 6 也可以选择，Esc 取消。",
+            text="提示：按数字键 1–7 也可以选择，Esc 取消。",
             foreground="#888888",
             font=self._sub_font,
         ).pack(pady=(16, 0))
@@ -1109,6 +1122,7 @@ class ModeDialog(tk.Toplevel if TK_AVAILABLE else object):
         self.bind("<KeyPress-4>", lambda event: self._choose(MODE_GAUGE))
         self.bind("<KeyPress-5>", lambda event: self._choose(MODE_THERMAL))
         self.bind("<KeyPress-6>", lambda event: self._choose(MODE_OCR))
+        self.bind("<KeyPress-7>", lambda event: self._choose(MODE_GAUGE_EXP16))
         self.bind("<Escape>", lambda event: self._cancel())
         self.protocol("WM_DELETE_WINDOW", self._cancel)
 
@@ -3589,6 +3603,236 @@ def calibration_ir_image(frame, scale, tmin=20.0, tmax=35.0):
     return cv2.resize(colors, (32 * scale, 24 * scale), interpolation=cv2.INTER_NEAREST)
 
 
+class Exp16GaugeApp:
+    """独立测试窗口：仅显示与读数严格同帧的标注，不接入任务执行链路。"""
+
+    POLL_MS = 50
+    PROCESS_INTERVAL = 0.2
+    LIVE_RESULT_TIMEOUT = 2.0
+    AVERAGE_COUNT = 10
+    STATUS_TEXT = {"missing": "未检测到", "unreadable": "无法读数", "error": "处理出错"}
+
+    def __init__(self, root, args, output_root, model_path, reader_factory):
+        self.root, self.args = root, args
+        self.output_root = output_root / "仪表识别测试_Exp16"
+        self.model_path = model_path
+        self._reader_factory = reader_factory
+        self._reader = None
+        self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gauge-exp16")
+        self._job = None  # 至多一帧在推理；不堆积实时相机帧。
+        self._camera = self._pending_image = self._result = None
+        self._source = ""
+        self._generation = 0
+        self._next_submit = 0.0
+        self._after_id = None
+        self._closed = False
+        self.status_var = tk.StringVar(master=root, value="请选择摄像头或打开一张原始照片。")
+        self.temp_var = tk.StringVar(master=root, value="温度：--")
+        self.humidity_var = tk.StringVar(master=root, value="湿度：--")
+        self.temp_average_var = tk.StringVar(master=root)
+        self.humidity_average_var = tk.StringVar(master=root)
+        self._temp_samples = deque(maxlen=self.AVERAGE_COUNT)
+        self._humidity_samples = deque(maxlen=self.AVERAGE_COUNT)
+        self._update_averages()
+        self._bold_font = tkfont.Font(root=root, size=12, weight="bold")
+
+        primary, content = _workspace(
+            self, "仪表识别测试 · Exp16", "YOLO + OpenCV",
+            "显示处理后的同一帧图像与即时读数；S 保存测试样本，Esc 退出。")
+        _action(primary, "连接摄像头", self.choose_camera, primary=True)
+        _action(primary, "打开图片", self.choose_image)
+        self.save_button = _action(primary, "保存测试样本 (S)", self.save_sample, state="disabled")
+        stats = _section(content, "当前帧读数")
+        for var in (self.temp_var, self.humidity_var):
+            ttk.Label(stats, textvariable=var, font=self._bold_font).pack(anchor="w", pady=(0, 5))
+        averages = _section(content, "最近 {} 次有效读数平均".format(self.AVERAGE_COUNT))
+        for var in (self.temp_average_var, self.humidity_average_var):
+            ttk.Label(averages, textvariable=var, font=self._bold_font).pack(anchor="w", pady=(0, 5))
+        ttk.Label(_section(content, "测试模型"), text=model_path.name,
+                  wraplength=210).pack(anchor="w")
+        self.preview.clear("等待图像输入")
+        root.title("仪表识别测试 · Exp16")
+        root.minsize(560, 420)
+        root.protocol("WM_DELETE_WINDOW", self.close)
+        root.bind("<Escape>", lambda event: self.close())
+        for key in ("s", "S"):
+            root.bind("<KeyPress-{}>".format(key), lambda event: self.save_sample())
+        self.open_camera(args.device or "0")
+        self._after_id = root.after(self.POLL_MS, self._tick)
+
+    def choose_camera(self):
+        dialog = CameraSelectDialog(self.root, current=self.args.device or "0")
+        self.root.wait_window(dialog)
+        if dialog.result:
+            self.open_camera(dialog.result)
+
+    def open_camera(self, source):
+        self._reset_source("正在连接摄像头…")
+        options = argparse.Namespace(**vars(self.args))
+        apply_gui_camera_defaults(options, MODE_GAUGE_EXP16, camera_name_for_source(source))
+        camera = Camera(parse_camera_source(source), width=options.width, height=options.height,
+                        fps=options.fps, sharpness=options.sharpness,
+                        pixel_format=options.pixel_format)  # 刻度方向固定，不对输入做镜像。
+        try:
+            camera.open()
+        except (CameraError, cv2.error) as error:
+            self.status_var.set(str(error).splitlines()[0])
+            self.preview.clear("相机未连接")
+            return
+        self._camera, self._source = camera, str(source)
+        self.args.device = source
+        self.status_var.set("已连接 {} · {}×{}，等待读数…".format(source, *camera.frame_size))
+
+    def choose_image(self):
+        path = filedialog.askopenfilename(
+            parent=self.root, title="打开原始仪表照片",
+            filetypes=(("图像", "*.jpg *.jpeg *.png *.bmp *.JPG *.JPEG *.PNG"), ("所有文件", "*")))
+        if not path:
+            return
+        try:
+            frame = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                raise ValueError("无法解码图片")
+        except (OSError, ValueError, cv2.error) as error:
+            messagebox.showerror("打开图片失败", str(error), parent=self.root)
+            return
+        self._reset_source("正在处理图片…")
+        self._source, self._pending_image = path, frame
+        self.status_var.set("正在读取 {}…".format(Path(path).name))
+
+    def _clear_result(self, text):
+        self._result = None
+        self.temp_var.set("温度：--")
+        self.humidity_var.set("湿度：--")
+        self.save_button.configure(state="disabled")
+        self.preview.clear(text)
+
+    def _reset_source(self, text):
+        self._generation += 1  # 丢弃切换来源前尚未完成的结果。
+        if self._camera is not None:
+            self._camera.release()
+        self._camera = self._pending_image = None
+        self._next_submit = 0.0
+        self._source = ""
+        self._temp_samples.clear()
+        self._humidity_samples.clear()
+        self._update_averages()
+        self._clear_result(text)
+        self.status_var.set(text)
+
+    def _process(self, frame):
+        if self._reader is None:
+            self._reader = self._reader_factory(self.model_path, device=self.args.infer_device)
+        return self._reader.process(frame)
+
+    def _tick(self):
+        if self._closed:
+            return
+        now = time.monotonic()
+        if self._job is not None:
+            future, generation, frame, submitted, captured_at = self._job
+            if future.done():
+                self._job = None
+                if generation == self._generation:
+                    try:
+                        self._show_result(frame, future.result(), captured_at, now - submitted)
+                    except Exception as error:
+                        self._reset_source("Exp16 运行失败")
+                        self.status_var.set("Exp16 运行失败：{}".format(str(error)[:240]))
+        if self._camera is not None:
+            if self._result is not None and now - self._result[3] > self.LIVE_RESULT_TIMEOUT:
+                self._clear_result("等待新的识别结果…")
+                self.status_var.set("读数已过期，等待下一帧…")
+            # 继续取最新画面；上一帧未算完时直接丢帧，不缓存。
+            try:
+                frame = self._camera.read()
+            except cv2.error:
+                frame = None
+            if frame is None:
+                self._reset_source("摄像头无画面或视频已结束；可重新连接。")
+            elif self._job is None and now >= self._next_submit:
+                self._submit(frame, now)
+        elif self._pending_image is not None and self._job is None:
+            self._submit(self._pending_image, now)
+            self._pending_image = None
+        self._after_id = self.root.after(self.POLL_MS, self._tick)
+
+    def _submit(self, frame, now):
+        self._job = (self._worker.submit(self._process, frame), self._generation, frame,
+                     now, datetime.now().astimezone().isoformat(timespec="milliseconds"))
+        self._next_submit = now + self.PROCESS_INTERVAL
+
+    @classmethod
+    def _reading_text(cls, title, unit, reading):
+        if reading.value is None:
+            return "{}：--（{}）".format(title, cls.STATUS_TEXT.get(reading.status, reading.status))
+        return "{}：{:.1f} {}".format(title, reading.value, unit)
+
+    def _update_averages(self, result=None):
+        for title, unit, samples, label, reading in (
+            ("温度", "°C", self._temp_samples, self.temp_average_var,
+             result.temperature if result is not None else None),
+            ("湿度", "%RH", self._humidity_samples, self.humidity_average_var,
+             result.humidity if result is not None else None),
+        ):
+            if reading is not None and reading.status == "ok" and reading.value is not None:
+                samples.append(reading.value)
+            count = len(samples)
+            if count == self.AVERAGE_COUNT:
+                label.set("{}：{:.1f} {}".format(title, sum(samples) / count, unit))
+            else:
+                label.set("{}：--（{}/{}）".format(title, count, self.AVERAGE_COUNT))
+
+    def _show_result(self, frame, result, captured_at, elapsed):
+        image = Image.fromarray(cv2.cvtColor(result.annotated, cv2.COLOR_BGR2RGB))
+        photo = self.preview.fit_image(image)
+        self.preview.configure(image=photo, text="")
+        self._result = (frame, result, captured_at, time.monotonic())
+        self.temp_var.set(self._reading_text("温度", "°C", result.temperature))
+        self.humidity_var.set(self._reading_text("湿度", "%RH", result.humidity))
+        self._update_averages(result)
+        self.save_button.configure(state="normal")
+        summary = "{} · {}×{} · 处理约 {:.0f} ms".format(
+            Path(self._source).name, frame.shape[1], frame.shape[0], elapsed * 1000)
+        errors = [reading.detail for reading in (result.temperature, result.humidity)
+                  if reading.status == "error" and reading.detail]
+        self.status_var.set("{} · {}".format(summary, errors[0][:180]) if errors else summary)
+
+    def save_sample(self):
+        if self._result is None:
+            return
+        frame, result, captured_at, shown_at = self._result
+        if self._camera is not None and time.monotonic() - shown_at > self.LIVE_RESULT_TIMEOUT:
+            self._clear_result("等待新的识别结果…")
+            self.status_var.set("读数已过期，不保存旧帧。")
+            return
+        folder = self.output_root / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        try:
+            folder.mkdir(parents=True)
+            for filename, bgr in (("raw.png", frame), ("annotated.png", result.annotated)):
+                Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)).save(folder / filename)
+            payload = result.as_dict()
+            payload.update({"model": self.model_path.name, "source": self._source,
+                            "captured_at": captured_at, "frame_size": [frame.shape[1], frame.shape[0]]})
+            (folder / "readings.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        except (OSError, ValueError, TypeError, cv2.error) as error:
+            self.status_var.set("保存样本失败：{}".format(error))
+            return
+        self.status_var.set("已保存原图、标注图和读数：{}".format(display_path(folder)))
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        if self._after_id is not None:
+            self.root.after_cancel(self._after_id)
+        if self._camera is not None:
+            self._camera.release()
+        self._worker.shutdown(wait=False)
+        self.root.destroy()
+
+
 class CalibrationWindow(object):
     """IR/RGB correspondence editor; consumes the main window's cached frames only."""
 
@@ -5680,6 +5924,47 @@ def run_gui_gauge(args, output_root: Path, root) -> int:
     return 0
 
 
+def run_gui_gauge_exp16(args, output_root: Path, root) -> int:
+    if not YOLO_RUNTIME_AVAILABLE:
+        messagebox.showerror("Exp16 不可用", "当前 Python 未安装 ultralytics。", parent=root)
+        root.destroy()
+        return 1
+    try:
+        from gauge_exp16 import Exp16Reader
+    except ImportError as error:
+        messagebox.showerror("Exp16 模块不可用", str(error), parent=root)
+        root.destroy()
+        return 1
+
+    script_dir = Path(_SCRIPT_DIR)
+    bundled = (script_dir.parent / "models" / "gauge_exp16.pt", script_dir / "gauge_exp16.pt")
+    if args.gauge_exp16_model:
+        model_path = Path(args.gauge_exp16_model).expanduser()
+    else:
+        model_path = next((path for path in bundled if path.is_file()), None)
+        if model_path is None:
+            chosen = filedialog.askopenfilename(
+                parent=root, title="选择来自可信交接包的 Exp16 best.pt（不是 Pose 模型）",
+                filetypes=(("YOLO 权重", "*.pt"),))
+            if not chosen:
+                root.destroy()
+                return 0
+            model_path = Path(chosen)
+    if model_path.suffix.lower() != ".pt" or not model_path.is_file():
+        messagebox.showerror("找不到 Exp16 权重", str(model_path), parent=root)
+        root.destroy()
+        return 1
+
+    app = Exp16GaugeApp(root, args, output_root, model_path, Exp16Reader)
+    root.deiconify()
+    app.preview.focus_set()
+    try:
+        root.mainloop()
+    finally:
+        app.close()
+    return 0
+
+
 def run_gui_thermal(args, output_root: Path, root) -> int:
     if not THERMAL_AVAILABLE:
         messagebox.showerror(
@@ -5873,6 +6158,9 @@ def run_gui(args, output_root: Path) -> int:
             root.destroy()
             print("[photo_capture] 已取消")
             return 0
+
+    if mode == MODE_GAUGE_EXP16:
+        return run_gui_gauge_exp16(args, output_root, root)
 
     if args.device is None:
         dialog = CameraSelectDialog(root, current="0")
@@ -6556,6 +6844,10 @@ def run_cli(args, output_root: Path) -> int:
         return run_scan_cli(args, output_root)
     if mode == MODE_GAUGE:
         return run_gauge_cli(args, output_root)
+    if mode == MODE_GAUGE_EXP16:
+        print("[photo_capture] Exp16 仪表测试需要 Tk 图形界面，请去掉 --no-gui 并在桌面运行。",
+              file=sys.stderr)
+        return 1
     if mode == MODE_THERMAL:
         return run_thermal_cli(args, output_root)
     if mode == MODE_OCR:
@@ -6656,10 +6948,14 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="调用本机摄像头拍照，或加载 YOLO 模型做实时检测。",
     )
-    parser.add_argument("--mode", choices=("ask", "photo", "detect", "scan", "gauge", "thermal", "ocr"),
+    parser.add_argument("--mode", choices=("ask", MODE_PHOTO, MODE_DETECT, MODE_SCAN,
+                                           MODE_GAUGE, MODE_GAUGE_EXP16, MODE_THERMAL, MODE_OCR),
                         default="ask",
                         help="启动模式：ask 每次询问，photo 拍照，detect 模型测试，"
-                             "scan 区域扫描，gauge 仪表识别，thermal 红外热像，ocr 文字识别")
+                             "scan 区域扫描，gauge 仪表识别，gauge-exp16 仪表测试（仅 GUI），"
+                             "thermal 红外热像，ocr 文字识别")
+    parser.add_argument("--gauge-exp16-model", default=None,
+                        help="仅 Exp16 测试模式使用：指定可信交接包中的 best.pt")
     parser.add_argument("-d", "--output-dir", default=str(DEFAULT_OUTPUT_DIR),
                         help="照片根目录（默认：~/Pictures/photo_capture）")
     parser.add_argument("-t", "--type", default=None,
@@ -6668,7 +6964,7 @@ def parse_args(argv=None):
                         help="一次连拍张数，1-{}（默认 1）".format(MAX_BURST))
     parser.add_argument("--device", default=None,
                         help="摄像头编号 / 设备路径 / 视频文件；"
-                             "GUI 不填会弹出选择框，CLI 不填用 0")
+                             "Exp16 或 CLI 不填用 0，其他 GUI 模式不填会弹出选择框")
     parser.add_argument("--model", default=None,
                         help="YOLO 权重路径或文件名；模型测试模式不填则启动时选择")
     parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR),
