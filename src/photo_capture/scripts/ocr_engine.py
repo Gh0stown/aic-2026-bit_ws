@@ -9,6 +9,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 from typing import List, Optional
 
 import cv2
@@ -98,19 +99,29 @@ class ChineseOcr:
                 raise OcrError(
                     "PaddleOCR 未安装或导入失败：{}".format(error))
             try:
+                # 本机 oneDNN/MKLDNN 在部分裁剪图上会偶发
+                # "could not execute a primitive"；关闭 MKLDNN 更稳。
                 self._ocr = PaddleOCR(
                     use_angle_cls=True, lang="ch", show_log=False,
-                    use_gpu=False)
+                    use_gpu=False, enable_mkldnn=False)
             except Exception as error:
                 raise OcrError("PaddleOCR 初始化失败：{}".format(error))
         return self._ocr
 
     def _run_paddle(self, image) -> List[OcrLine]:
         engine = self._engine()
+        image = np.ascontiguousarray(image)
+        height, width = image.shape[:2]
+        if height < 8 or width < 8:
+            return []
         try:
             raw = engine.ocr(image, cls=True)
-        except Exception as error:
-            raise OcrError("中文 OCR 失败：{}".format(error))
+        except Exception as first_error:
+            # 偶发 primitive 错误：用连续内存再试一次
+            try:
+                raw = engine.ocr(np.ascontiguousarray(image), cls=True)
+            except Exception as second_error:
+                raise OcrError("中文 OCR 失败：{}".format(second_error))
         lines = []
         first = raw[0] if raw else None
         for item in first or []:
@@ -140,7 +151,8 @@ class ChineseOcr:
         return model
 
     def _detect_boxes(self, image, model_path: str,
-                      conf: float = 0.25, imgsz: int = 640):
+                      conf: float = 0.25, imgsz: int = 640,
+                      with_names: bool = False):
         model = self._load_detector(model_path)
         try:
             results = model.predict(
@@ -152,14 +164,17 @@ class ChineseOcr:
         for result in results:
             if result.boxes is None:
                 continue
-            for box in result.boxes.xyxy:
+            names = getattr(result, "names", {}) or {}
+            for box, cls in zip(result.boxes.xyxy, result.boxes.cls):
                 try:
                     x1, y1, x2, y2 = [int(round(float(v)))
                                       for v in box[:4]]
+                    name = str(names.get(int(cls), int(cls)))
                 except Exception:
                     continue
                 if x2 > x1 and y2 > y1:
-                    boxes.append((x1, y1, x2, y2))
+                    boxes.append((x1, y1, x2, y2, name)
+                                 if with_names else (x1, y1, x2, y2))
         boxes.sort(key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
         return boxes[:8]
 
@@ -427,3 +442,83 @@ class PlateOcr:
                     return result
             return self._hyperlpr(image)
         return self._generic(image, detector_model)
+
+
+class MeterOcr:
+    """电表数字屏：voltage.pt 的 shuju 类裁剪后，用 PaddleOCR 读取数字。"""
+
+    DEFAULT_MODEL = str(Path.home() / "AI视觉" / "voltage.pt")
+
+    def __init__(self):
+        self._ocr = ChineseOcr()
+
+    @staticmethod
+    def _is_meter_class(name: str) -> bool:
+        lowered = str(name or "").lower()
+        return any(key in lowered for key in
+                   ("shuju", "meter", "data", "kwh", "电表", "读数"))
+
+    @staticmethod
+    def _read_number(text: str):
+        candidates = re.findall(r"\d+(?:[.,]\d+)?", str(text or ""))
+        candidates = [candidate.replace(",", ".") for candidate in candidates]
+        for candidate in candidates:
+            try:
+                # Keep the original decimal string; no forced rounding.
+                float(candidate)
+                return candidate
+            except ValueError:
+                continue
+        return ""
+
+    def recognize(self, image, detector_model: str = "") -> OcrResult:
+        image = _ensure_bgr(image)
+        model_path = str(detector_model or "").strip()
+        if not model_path:
+            raise OcrError("请选择电表裁剪模型（如 ~/AI视觉/voltage.pt）")
+        try:
+            boxes = self._ocr._detect_boxes(
+                image, model_path, with_names=True)
+        except Exception as error:
+            raise OcrError("电表检测失败：{}".format(error))
+        if not boxes:
+            return OcrResult(
+                ok=False, kind="meter", annotated=image.copy(),
+                message="未检测到电表屏幕")
+        selected = [box for box in boxes if self._is_meter_class(box[4])]
+        if selected:
+            boxes = selected
+        lines = []
+        used_boxes = []
+        readings = []
+        for box in boxes:
+            crop, clipped = self._ocr._crop(image, box[:4])
+            used_boxes.append(clipped)
+            if crop is None:
+                continue
+            local = self._ocr._run_paddle(crop)
+            lines.extend(_offset_lines(local, clipped[0], clipped[1]))
+            text = " ".join(line.text for line in local)
+            number = self._read_number(text)
+            if number:
+                unit = "kWh" if "kwh" in text.lower() or "kwh" in str(box[4]).lower() else "kWh"
+                readings.append((number, unit))
+                break
+        annotated = self._ocr._annotate(
+            image, lines, used_boxes, color=(0, 128, 255))
+        if readings:
+            number, unit = readings[0]
+            cv2.putText(annotated, "{} {}".format(number, unit),
+                        (max(4, used_boxes[0][0]),
+                         max(18, used_boxes[0][1] - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                        (0, 128, 255), 2)
+            return OcrResult(
+                ok=True, kind="meter",
+                text="{} {}".format(number, unit),
+                lines=lines, annotated=annotated,
+                message="电表读数")
+        return OcrResult(
+            ok=False, kind="meter",
+            text=_text_of(lines), lines=lines, annotated=annotated,
+            message="检测到屏幕，但未识别到数字")

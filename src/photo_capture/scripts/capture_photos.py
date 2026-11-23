@@ -56,6 +56,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime
@@ -3620,6 +3621,12 @@ class Exp16GaugeApp:
         self._round = 1
         self._reported = {}  # 已显示的值保持不变，续采只处理仍无结果的表。
         self.output_root = output_root / "仪表识别测试_Exp16"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self._log_path = self.output_root / "logs" / "{}_{}.jsonl".format(stamp, os.getpid())
+        self._log_failed = False
+        self._log_started_at = None
+        self._round_started_at = None
+        self._round_rejections = {key: Counter() for key in ("temperature", "humidity")}
         self.model_path = model_path
         self._reader_factory = reader_factory
         self._reader = None
@@ -3637,6 +3644,7 @@ class Exp16GaugeApp:
         self.progress_var = tk.StringVar(master=root, value="未开始测量")
         self.temp_auto_ring_var = tk.BooleanVar(master=root, value=args.gauge_exp16_temp_auto_ring)
         self.humidity_auto_scale_var = tk.BooleanVar(master=root, value=args.gauge_exp16_humidity_auto_scale)
+        self.log_var = tk.StringVar(master=root, value="日志：{}".format(self._log_path.name))
         self._bold_font = tkfont.Font(root=root, size=12, weight="bold")
 
         primary, content = _workspace(
@@ -3661,8 +3669,9 @@ class Exp16GaugeApp:
         for var in (self.temp_var, self.humidity_var):
             ttk.Label(stats, textvariable=var, font=self._bold_font,
                       wraplength=210).pack(anchor="w", pady=(0, 5))
-        ttk.Label(_section(content, "测试模型"), text=model_path.name,
-                  wraplength=210).pack(anchor="w")
+        info = _section(content, "测试模型与日志")
+        ttk.Label(info, text=model_path.name, wraplength=210).pack(anchor="w")
+        ttk.Label(info, textvariable=self.log_var, wraplength=210).pack(anchor="w", pady=(4, 0))
         self.preview.clear("等待图像输入")
         root.title("仪表识别测试 · Exp16")
         root.minsize(560, 420)
@@ -3672,6 +3681,47 @@ class Exp16GaugeApp:
             root.bind("<KeyPress-{}>".format(key), lambda event: self.save_sample())
         self.open_camera(args.device or "0")
         self._after_id = root.after(self.POLL_MS, self._tick)
+
+    def _algorithm_names(self):
+        return {
+            "temperature_algorithm": "auto-ring" if self.temp_auto_ring_var.get() else "legacy",
+            "humidity_algorithm": "auto-scale" if self.humidity_auto_scale_var.get() else "legacy",
+        }
+
+    def _log_event(self, event, **data):
+        if self._log_failed:
+            return
+        entry = dict(event=event, measurement_id=self._generation,
+                     logged_at=datetime.now().astimezone().isoformat(timespec="milliseconds"), **data)
+        try:
+            line = json.dumps(entry, ensure_ascii=False, allow_nan=False)
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._log_path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except (OSError, TypeError, ValueError) as error:
+            self._log_failed = True
+            self.log_var.set("日志写入失败，测量仍继续")
+            print("[photo_capture] Exp16 日志写入失败 {}：{}".format(self._log_path, error),
+                  file=sys.stderr)
+
+    def _start_measurement_log(self):
+        if self._log_started_at is not None:
+            return
+        self._log_started_at = time.monotonic()
+        self._round_started_at = self._log_started_at
+        self._log_event("measurement_start", source=self._source,
+                        input_kind="capture" if self._camera is not None else "image",
+                        model=self.model_path.name, infer_device=self.args.infer_device,
+                        initial_frames=self._batch_size, max_round_frames=self._max_batch_size,
+                        **self._algorithm_names())
+
+    def _end_measurement_log(self, reason):
+        if self._log_started_at is None:
+            return
+        self._log_event("measurement_end", reason=reason, round=self._round,
+                        round_attempts=self._batch.count, displayed_readings=self._reported,
+                        elapsed_ms=round((time.monotonic() - self._log_started_at) * 1000, 1))
+        self._log_started_at = None
 
     def choose_camera(self):
         dialog = CameraSelectDialog(self.root, current=self.args.device or "0")
@@ -3701,6 +3751,7 @@ class Exp16GaugeApp:
         self.measure_button.configure(state="normal")
         self.progress_var.set("采样 0/{}，请保持静止".format(self._batch_size))
         self.status_var.set("已连接 {} · {}×{}，开始测量…".format(source, *camera.frame_size))
+        self._start_measurement_log()
 
     def choose_image(self):
         path = filedialog.askopenfilename(
@@ -3719,21 +3770,25 @@ class Exp16GaugeApp:
         self._source, self._pending_image = path, frame
         self.progress_var.set("单图检查，不产生稳定读数")
         self.status_var.set("正在读取 {}…".format(Path(path).name))
+        self._start_measurement_log()
 
-    def _reset_source(self, text):
+    def _reset_source(self, text, *, log_reason="source_changed"):
         if self._camera is not None:
             self._camera.release()
         self._camera = self._pending_image = None
         self._source = ""
         self.measure_button.configure(state="disabled")
-        self._reset_measurement(text)
+        self._reset_measurement(text, log_reason=log_reason)
 
-    def _reset_measurement(self, text):
+    def _reset_measurement(self, text, *, log_reason):
+        self._end_measurement_log(log_reason)
         self._generation += 1  # 丢弃切换输入或算法前尚未完成的推理。
         self._next_submit = 0.0
         self._batch = self._new_batch()
         self._last_batch = self._result = None
         self._round = 1
+        for counter in self._round_rejections.values():
+            counter.clear()
         self._reported.clear()
         self.temp_var.set("温度：--")
         self.humidity_var.set("湿度：--")
@@ -3752,12 +3807,15 @@ class Exp16GaugeApp:
             elif self._job is not None and self._job[1] == self._generation:
                 photo = self._job[2]
         mode = "{}（实验）".format(experiment) if enabled else "交接版"
-        self._reset_measurement("{}算法已切换为{}".format(dial, mode))
+        self._reset_measurement("{}算法已切换为{}".format(dial, mode),
+                                log_reason="algorithm_changed")
         if self._camera is not None:
             self.progress_var.set("采样 0/{}，请保持静止".format(self._batch_size))
+            self._start_measurement_log()
         elif photo is not None:
             self._pending_image = photo
             self.progress_var.set("单图检查，不产生稳定读数")
+            self._start_measurement_log()
 
     def _process(self, frame, temp_auto_ring, humidity_auto_scale=False):
         if self._reader is None:
@@ -3781,7 +3839,10 @@ class Exp16GaugeApp:
                     try:
                         self._show_result(frame, future.result(), captured_at, now - submitted)
                     except Exception as error:
-                        self._reset_source("Exp16 运行失败")
+                        self._log_event("frame_error", round=self._round if self._camera is not None else None,
+                                        captured_at=captured_at, submit_to_result_ms=round((now - submitted) * 1000, 1),
+                                        detail="{}: {}".format(type(error).__name__, error))
+                        self._reset_source("Exp16 运行失败", log_reason="processing_error")
                         self.status_var.set("Exp16 运行失败：{}".format(str(error)[:240]))
         if self._camera is not None and len(self._reported) < 2:
             # 只取最新画面，不缓存；两表都有读数时才结束采样。
@@ -3790,7 +3851,8 @@ class Exp16GaugeApp:
             except cv2.error:
                 frame = None
             if frame is None:
-                self._reset_source("摄像头无画面或视频已结束；可重新连接。")
+                self._reset_source("摄像头无画面或视频已结束；可重新连接。",
+                                   log_reason="capture_ended")
             elif self._job is None and now >= self._next_submit:
                 self._submit(frame, now)
         elif self._pending_image is not None and self._job is None:
@@ -3824,10 +3886,19 @@ class Exp16GaugeApp:
                 label.set("{}：{:.1f} {}{}".format(title, reading.value, unit, notice))
                 self._reported[key] = dict(reading.as_dict(), round=self._round)
 
-        if len(self._reported) == 2:
+        retry_dials = [dial for dial in ("temperature", "humidity") if dial not in self._reported]
+        self._log_event("round_end", round=self._round,
+                        elapsed_ms=round((time.monotonic() - self._round_started_at) * 1000, 1),
+                        rejected_by_reason=self._round_rejections, retry_dials=retry_dials,
+                        displayed_readings=self._reported, **measured.as_dict())
+        if not retry_dials:
             self.progress_var.set("测量结束 · 第 {} 轮 {} 帧".format(self._round, measured.frame_count))
+            self._end_measurement_log("completed")
         else:
             self._round += 1
+            self._round_started_at = time.monotonic()
+            for counter in self._round_rejections.values():
+                counter.clear()
             self._batch = self._new_batch(collect_temperature="temperature" not in self._reported,
                                           collect_humidity="humidity" not in self._reported)
             self.progress_var.set("本轮未读齐，自动开始第 {} 轮".format(self._round))
@@ -3847,8 +3918,21 @@ class Exp16GaugeApp:
         image = Image.fromarray(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB))
         self.preview.configure(image=self.preview.fit_image(image), text="")
 
+        self._start_measurement_log()
+        readings = result.as_dict()
+        capture = self._camera is not None
+        if capture:
+            for dial, reading in readings.items():
+                if dial not in self._reported and reading["status"] != "ok":
+                    reason = reading["detail"] or reading["status"]
+                    self._round_rejections[dial][reason] += 1
+        self._log_event("frame", round=self._round if capture else None,
+                        frame_in_round=self._batch.count + 1 if capture else None,
+                        captured_at=captured_at, frame_size=[frame.shape[1], frame.shape[0]],
+                        submit_to_result_ms=round(elapsed * 1000, 1), **readings)
+
         measured = None
-        if self._camera is not None:
+        if capture:
             temp, hum = result.temperature, result.humidity
             measured = self._batch.add(
                 temp.value if temp.status == "ok" else None,
@@ -3865,7 +3949,9 @@ class Exp16GaugeApp:
             else:
                 self.progress_var.set("第 {} 轮采样 {}/{}，请保持静止".format(
                     self._round, self._batch.count, self._batch_size))
-        if self._camera is None or measured is not None:
+        if not capture:
+            self._end_measurement_log("image_checked")
+        if not capture or measured is not None:
             self._result = (frame, result, captured_at)
             self.save_button.configure(state="normal")
 
@@ -3888,9 +3974,11 @@ class Exp16GaugeApp:
             payload.update({
                 "model": self.model_path.name, "source": self._source,
                 "captured_at": captured_at, "frame_size": [frame.shape[1], frame.shape[0]],
-                "temperature_algorithm": "auto-ring" if self.temp_auto_ring_var.get() else "legacy",
-                "humidity_algorithm": "auto-scale" if self.humidity_auto_scale_var.get() else "legacy",
+                **self._algorithm_names(),
             })
+            if not self._log_failed and self._log_path.is_file():
+                payload["diagnostic_log"] = str(self._log_path.relative_to(self.output_root))
+                payload["measurement_id"] = self._generation
             if self._last_batch is not None:
                 payload["stable_readings"] = self._last_batch.as_dict()
                 payload["displayed_readings"] = self._reported
@@ -3907,6 +3995,7 @@ class Exp16GaugeApp:
         self._closed = True
         if self._after_id is not None:
             self.root.after_cancel(self._after_id)
+        self._end_measurement_log("window_closed")
         if self._camera is not None:
             self._camera.release()
         self._worker.shutdown(wait=False)
@@ -5345,9 +5434,11 @@ class OcrApp(object):
         self._busy = False
         self._dialog_open = False
         self._queue = queue.Queue()
+        self._task_queue = queue.Queue()
         self._last_result = None
         self._cn = ocr_engine.ChineseOcr()
         self._plate = ocr_engine.PlateOcr()
+        self._meter = ocr_engine.MeterOcr()
         self._buttons = []
         self._bold_font = tkfont.Font(root=root, size=12, weight="bold")
         self.status_var = tk.StringVar(value="就绪：按空格识别当前画面")
@@ -5360,8 +5451,19 @@ class OcrApp(object):
             value=display_path(default_plate) if default_plate.exists()
             else "未选择：整图检测")
         self.plate_mode_var = tk.StringVar(value="generic")
+        default_meter = Path.home() / "AI视觉" / "voltage.pt"
+        self.meter_det_model_var = tk.StringVar(
+            value=str(default_meter) if default_meter.exists() else "")
+        self.meter_det_model_display = tk.StringVar(
+            value=display_path(default_meter) if default_meter.exists()
+            else "未选择：不会自动检测电表")
         self._build_ui()
         self._bind_keys()
+        # PaddleOCR 的推理引擎固定在同一个工作线程里复用，避免跨线程
+        # 复用 oneDNN 状态导致偶发 primitive 错误。
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop, name="ocr-worker", daemon=True)
+        self._worker_thread.start()
         self.root.title("文字识别 - OCR")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.minsize(760, 560)
@@ -5371,7 +5473,7 @@ class OcrApp(object):
         primary, content = _workspace(
             self, "文字识别", "OCR",
             "空格 识别当前画面  ·  Esc 退出\n"
-            "中文：PaddleOCR；车牌：HyperLPR3。"
+            "中文：PaddleOCR；车牌/电表：YOLO 裁剪 + OCR。"
             "首次识别会在后台加载模型，请稍候。")
         ttk.Label(primary, text="相机：{}".format(
             parse_camera_source(self.camera.source)),
@@ -5453,6 +5555,34 @@ class OcrApp(object):
             background="#f4f8fb", foreground="#203247", state="disabled")
         self.plate_text.pack(fill="both", expand=True, pady=(4, 0))
 
+        meter_tab = ttk.Frame(self.notebook, padding=6)
+        self.notebook.add(meter_tab, text="电表")
+        ttk.Label(
+            meter_tab,
+            text="voltage.pt 先裁 shuju 数字屏，PaddleOCR 读数字和 kWh。",
+            style="Capture.Muted.TLabel", wraplength=225, justify="left").pack(
+            anchor="w", pady=(0, 5))
+        ttk.Label(
+            meter_tab, text="电表裁剪 YOLO（默认 voltage.pt）",
+            style="Capture.Section.TLabel").pack(anchor="w", pady=(2, 2))
+        ttk.Label(
+            meter_tab, textvariable=self.meter_det_model_display,
+            style="Capture.Muted.TLabel", wraplength=225, justify="left").pack(
+            anchor="w", pady=(0, 3))
+        choose_meter_button = _action(
+            meter_tab, "选择电表裁剪模型…", self.choose_meter_detector)
+        self._buttons.append(choose_meter_button)
+        clear_meter_button = _action(
+            meter_tab, "清除电表裁剪模型", self.clear_meter_detector)
+        self._buttons.append(clear_meter_button)
+        meter_button = _action(
+            meter_tab, "识别电表", lambda: self.start_ocr("meter"))
+        self._buttons.append(meter_button)
+        self.meter_text = tk.Text(
+            meter_tab, height=11, wrap="word", relief="flat",
+            background="#f4f8fb", foreground="#203247", state="disabled")
+        self.meter_text.pack(fill="both", expand=True, pady=(4, 0))
+
         ttk.Label(
             content, text="保存位置：{}".format(display_path(self.ocr_dir)),
             style="Capture.Muted.TLabel", wraplength=225, justify="left").pack(
@@ -5476,9 +5606,19 @@ class OcrApp(object):
 
     def _selected_kind(self) -> str:
         try:
-            return "chinese" if self.notebook.index(self.notebook.select()) == 0 else "plate"
+            index = int(self.notebook.index(self.notebook.select()))
+            return ("chinese", "plate", "meter")[index]
         except Exception:
             return "chinese"
+
+    def _target_text(self, kind: str):
+        return {"chinese": self.cn_text, "plate": self.plate_text,
+                "meter": self.meter_text}.get(kind, self.cn_text)
+
+    @staticmethod
+    def _kind_name(kind: str) -> str:
+        return {"chinese": "中文文字", "plate": "车牌", "meter": "电表"}.get(
+            kind, kind)
 
     def choose_detector(self) -> None:
         self._dialog_open = True
@@ -5521,6 +5661,26 @@ class OcrApp(object):
         self.plate_det_model_display.set("未选择：整图检测")
         self._set_status("已清除车牌裁剪模型，车牌将整图检测")
 
+    def choose_meter_detector(self) -> None:
+        self._dialog_open = True
+        try:
+            path = filedialog.askopenfilename(
+                parent=self.root, title="选择电表 YOLO 裁剪模型",
+                initialdir=str(Path.home() / "AI视觉"),
+                filetypes=(("YOLO 权重", "*.pt"), ("所有文件", "*.*")))
+        finally:
+            self._dialog_open = False
+        if not path:
+            return
+        self.meter_det_model_var.set(path)
+        self.meter_det_model_display.set(display_path(path))
+        self._set_status("电表裁剪模型：{}".format(display_path(path)))
+
+    def clear_meter_detector(self) -> None:
+        self.meter_det_model_var.set("")
+        self.meter_det_model_display.set("未选择：不会自动检测电表")
+        self._set_status("已清除电表裁剪模型，电表识别不可用")
+
     def recognize_current(self) -> None:
         self.start_ocr(self._selected_kind())
 
@@ -5534,35 +5694,42 @@ class OcrApp(object):
         options = {}
         if kind == "chinese":
             options["detector_model"] = self.det_model_var.get().strip()
-        else:
+        elif kind == "plate":
             options["plate_mode"] = self.plate_mode_var.get()
             options["plate_detector_model"] = self.plate_det_model_var.get().strip()
+        else:
+            options["meter_detector_model"] = self.meter_det_model_var.get().strip()
         self._busy = True
         self._show_result = False
         self._annotated = None
         self._last_result = None
         self.save_button.configure(state="disabled")
         self._set_buttons(False)
-        target = self.cn_text if kind == "chinese" else self.plate_text
+        target = self._target_text(kind)
         self._set_text(target, "识别中…\n首次运行会加载模型，请稍候。")
-        self._set_status("正在识别{}…".format(
-            "中文文字" if kind == "chinese" else "车牌"))
-        worker = threading.Thread(
-            target=self._worker, args=(kind, frame, options), daemon=True)
-        worker.start()
+        self._set_status("正在识别{}…".format(self._kind_name(kind)))
+        self._task_queue.put((kind, frame, options))
 
-    def _worker(self, kind: str, frame, options) -> None:
-        try:
-            if kind == "chinese":
-                result = self._cn.recognize(
-                    frame, detector_model=options.get("detector_model", ""))
-            else:
-                result = self._plate.recognize(
-                    frame, mode=options.get("plate_mode", "generic"),
-                    detector_model=options.get("plate_detector_model", ""))
-            self._queue.put((kind, result, None))
-        except Exception as error:
-            self._queue.put((kind, None, error))
+    def _worker_loop(self) -> None:
+        while True:
+            task = self._task_queue.get()
+            if task is None:
+                return
+            kind, frame, options = task
+            try:
+                if kind == "chinese":
+                    result = self._cn.recognize(
+                        frame, detector_model=options.get("detector_model", ""))
+                elif kind == "plate":
+                    result = self._plate.recognize(
+                        frame, mode=options.get("plate_mode", "generic"),
+                        detector_model=options.get("plate_detector_model", ""))
+                else:
+                    result = self._meter.recognize(
+                        frame, detector_model=options.get("meter_detector_model", ""))
+                self._queue.put((kind, result, None))
+            except Exception as error:
+                self._queue.put((kind, None, error))
 
     def _set_buttons(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -5605,22 +5772,21 @@ class OcrApp(object):
         self._busy = False
         self._set_buttons(True)
         if error is not None:
-            target = self.cn_text if kind == "chinese" else self.plate_text
+            target = self._target_text(kind)
             self._set_text(target, "识别失败：{}".format(error))
             self._set_status("识别失败：{}".format(error), error=True)
             return
         self._last_result = result
         self._annotated = result.annotated
         self._show_result = result.annotated is not None
-        target = self.cn_text if kind == "chinese" else self.plate_text
+        target = self._target_text(kind)
         self._set_text(target, result.text or result.message)
         self.save_button.configure(
             state="normal" if result.annotated is not None else "disabled")
         self._render(self._annotated)
         self._set_status(
             "{}：{} 个目标{}".format(
-                "中文文字" if kind == "chinese" else "车牌",
-                len(result.lines),
+                self._kind_name(kind), len(result.lines),
                 "" if result.message == "" else "（{}）".format(result.message)))
 
     def _render(self, frame=None) -> None:
@@ -5649,7 +5815,8 @@ class OcrApp(object):
         try:
             self.ocr_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-            kind_name = "中文" if result.kind == "chinese" else "车牌"
+            kind_name = {"chinese": "中文", "plate": "车牌",
+                         "meter": "电表"}.get(result.kind, result.kind)
             image_path = self.ocr_dir / "{}_{}.jpg".format(kind_name, stamp)
             json_path = self.ocr_dir / "{}_{}.json".format(kind_name, stamp)
             if not cv2.imwrite(str(image_path), result.annotated):
@@ -5687,6 +5854,10 @@ class OcrApp(object):
             except tk.TclError:
                 pass
             self._after_id = None
+        try:
+            self._task_queue.put(None)
+        except Exception:
+            pass
         try:
             self.camera.release()
         except Exception:

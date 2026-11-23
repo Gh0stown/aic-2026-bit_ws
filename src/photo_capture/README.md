@@ -12,8 +12,8 @@
   按多刻度插值读数，保存截图和 JSONL 记录。
 - **红外热像模式**：通过 `mlx90640_ros.thermal_session` 显示 MLX90640 热图，
   支持 `capture.bin` 回放、串口实机、楼层标定和 PNG+JSON 快照。
-- **文字识别模式**：同一个 OCR 分区里提供两个页签——
-  PaddleOCR 中文文字识别，和 HyperLPR3 车牌识别；识别结果可保存 JPG+JSON。
+- **文字识别模式**：同一个 OCR 分区里提供三个页签——
+  PaddleOCR 中文文字、车牌识别、电表数字识别；识别结果可保存 JPG+JSON。
 
 > 区域扫描目前只做**平移**场景，不做旋转全景。
 
@@ -530,15 +530,16 @@ rosrun photo_capture capture_photos.py --no-gui --mode thermal \
 - 串口不能用 `/dev/ttyUSB0` 猜，先看 `/dev/serial/by-id/`。
 
 
-## 文字识别模式（中文 OCR / 车牌 OCR）
+## 文字识别模式（中文 OCR / 车牌 OCR / 电表 OCR）
 
-一个 OCR 模式、两个页签，共用摄像头预览和“保存结果”按钮：
+一个 OCR 模式、三个页签，共用摄像头预览和“保存结果”按钮：
 
 - **中文文字**：PaddleOCR（`lang=ch`），检测中文/英文/数字/标点，结果按 `#序号` 列出；
   可以选择一个 YOLO 模型先检测楼宇/文字区域，只对裁剪图做 OCR，省掉背景干扰；
 - **车牌识别**：两种模式——
   - **沙盘/非标（通用 OCR，默认）**：用 PaddleOCR 读车牌框内文字，不要求首字是省份缩写；
   - **真实车牌（HyperLPR3）**：输出车牌号、车牌类型（蓝牌/黄牌/绿牌等）和置信度。
+- **电表**：用 `voltage.pt` 的 `shuju` 类先裁数字屏，PaddleOCR 读取数字和 `kWh` 单位。
 
 ### 操作
 
@@ -550,6 +551,9 @@ rosrun photo_capture capture_photos.py --no-gui --mode thermal \
 | 车牌页签「选择车牌裁剪模型…」 | 可选训练好的 `plate.pt`，先裁车牌再识别；模型存在时默认自动选上 |
 | 「清除车牌裁剪模型」 | 回到整图车牌检测 |
 | 车牌页签「通用 OCR」 / 「HyperLPR3」 | 切换裁剪后的识别后端 |
+| 电表页签「选择电表裁剪模型…」 | 默认自动用 `~/AI视觉/voltage.pt`，可换模型 |
+| 「清除电表裁剪模型」 | 电表识别不可用（不会退回整图乱找数字） |
+| 电表页签「识别电表」 | 裁剪 `shuju` 框后 OCR，输出 `123.4 kWh` |
 | 「恢复实时预览」 | 从识别结果图回到摄像头实时画面 |
 | 「保存当前结果」 | 保存带框 JPG + JSON 到 `~/Pictures/photo_capture/OCR/` |
 | `Esc` / 关窗口 | 退出并释放摄像头 |
@@ -603,7 +607,26 @@ HyperLPR3 的识别字典按真实中国车牌设计，第一字期望是省份�
 - 裁剪后 HyperLPR3 加背景：仍可能读成 `沪B12345`，说明沙盘牌应优先用通用 OCR。
 真实车牌切到 HyperLPR3 可保留车牌类型和置信度。
 
-### 为什么选这两个
+### 电表 YOLO 裁剪
+
+电表页签默认自动加载 `~/AI视觉/voltage.pt`（类别 `wendu/shidu/shuju`），只取
+`shuju` 数字屏框，外扩 6% 裁剪后整块交给 PaddleOCR：
+
+```text
+当前帧 → voltage.pt 检测 shuju 数字屏 → 裁剪 → PaddleOCR 读数字/kWh
+       → 正则取数值 → 输出 123.4 kWh，并画屏幕框
+```
+
+实测站房照片 `最终机位拍摄仪表_20261120_200558_459_0082.jpg`：
+
+- `voltage.pt` 检出 `shuju`，置信度 0.96；
+- PaddleOCR 读出 `123.4` + `kWh`；
+- 最终输出 `123.4 kWh`。
+
+如果模型没检测到 `shuju`，显示“未检测到电表屏幕”；如果屏幕里没数字，显示
+“检测到屏幕，但未识别到数字”，不会乱报一个数字。
+
+### 为什么选这些
 
 - 中文文字：本机已有 PaddleOCR + 中文模型，`ch_PP-OCRv4` 对中文/数字/标点效果稳定，
   比 EasyOCR 更贴近中文场景，CPU 也能到约 1–2 帧/秒；
@@ -617,7 +640,9 @@ HyperLPR3 的识别字典按真实中国车牌设计，第一字期望是省份�
 ├── 中文_YYYYmmdd_HHMMSS_mmm.jpg
 ├── 中文_YYYYmmdd_HHMMSS_mmm.json
 ├── 车牌_YYYYmmdd_HHMMSS_mmm.jpg
-└── 车牌_YYYYmmdd_HHMMSS_mmm.json
+├── 车牌_YYYYmmdd_HHMMSS_mmm.json
+├── 电表_YYYYmmdd_HHMMSS_mmm.jpg
+└── 电表_YYYYmmdd_HHMMSS_mmm.json
 ```
 
 JSON 包含 `kind`、`text`、`message`、每行 `text/confidence/points` 和保存时间。
@@ -629,6 +654,9 @@ JSON 包含 `kind`、`text`、`message`、每行 `text/confidence/points` 和保
 python3 -c "import paddleocr, hyperlpr3, onnxruntime; print('ok')"
 ```
 
+> 如果旧版本偶发 `could not execute a primitive`：当前代码已关闭 Paddle 的 MKLDNN，
+> 并把所有 OCR 固定在同一个工作线程；重启 GUI 后旧错误应消失。
+
 本机模型已缓存；若换机器首次运行会自动下载。PaddleOCR 模型目录
 `~/.paddleocr/whl`，HyperLPR3 模型目录 `~/.hyperlpr3/20230229`。
 `onnxruntime` 对 Python 3.8 固定用 1.16.x。
@@ -637,7 +665,7 @@ python3 -c "import paddleocr, hyperlpr3, onnxruntime; print('ok')"
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--mode` | `ask` | `ask` 每次询问 / `photo` / `detect` / `scan` / `gauge` / `thermal` |
+| `--mode` | `ask` | `ask` 每次询问 / `photo` / `detect` / `scan` / `gauge` / `thermal` / `ocr` |
 | `-d, --output-dir` | `~/Pictures/photo_capture` | 照片、模型截图、区域扫描、仪表记录的根目录 |
 | `-t, --type` | 无（启动时询问） | 预填照片类型 |
 | `-c, --count` | `1` | 一次连拍张数（1-99） |
