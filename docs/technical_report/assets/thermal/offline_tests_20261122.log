@@ -1,0 +1,237 @@
+THERMAL DOCUMENTATION EVIDENCE
+Prepared: 2026-11-22T17:41:50.904135+08:00
+HEAD: cdbbf0f790e635d15ff27afeefc877dd0f74472a
+Scope: focused offline tests; GUI uses synthetic frames and hardware mocks; no serial/camera/model is opened.
+ROS opt-in integration is NOT enabled in this run.
+
+## IR/RGB geometry
+Command: /usr/bin/python3 -m unittest discover -s src/photo_capture/tests -p test_thermal_calibration.py -v
+test_exactly_four_corners_fit (test_thermal_calibration.GeometryTests) ... ok
+test_find_homography_is_non_ransac_col_row (test_thermal_calibration.GeometryTests) ... ok
+test_fit_recovers_synthetic_homography_and_records_row_col (test_thermal_calibration.GeometryTests) ... ok
+test_invalid_fit_metadata (test_thermal_calibration.GeometryTests) ... ok
+test_preview_scale_and_mirror_metadata_do_not_change_geometry (test_thermal_calibration.GeometryTests) ... ok
+test_project_is_invariant_under_homogeneous_scale_and_allows_offscreen (test_thermal_calibration.GeometryTests) ... ok
+test_project_order_and_subpixel_precision (test_thermal_calibration.GeometryTests) ... ok
+test_projection_rejects_invalid_h_and_nonfinite_coordinates (test_thermal_calibration.GeometryTests) ... ok
+test_projection_rejects_zero_denominator_and_nonfinite_result (test_thermal_calibration.GeometryTests) ... ok
+test_rejects_collinear_ir_or_rgb (test_thermal_calibration.GeometryTests) ... ok
+test_rejects_duplicate_ir_or_rgb_even_when_other_coords_differ (test_thermal_calibration.GeometryTests) ... ok
+test_rejects_too_few_wrong_shape_nonfinite_and_outside_points (test_thermal_calibration.GeometryTests) ... ok
+test_rms_is_mean_squared_euclidean_not_per_component (test_thermal_calibration.GeometryTests) ... ok
+test_solver_failure_and_singular_result_become_valueerror (test_thermal_calibration.GeometryTests) ... ok
+test_invalid_save_never_touches_original (test_thermal_calibration.PersistenceTests) ... ok
+test_load_revalidates_geometry_and_horizon (test_thermal_calibration.PersistenceTests) ... ok
+test_missing_file_is_clear_oserror_not_silent_fallback (test_thermal_calibration.PersistenceTests) ... ok
+test_optional_extra_ui_fields_are_ignored (test_thermal_calibration.PersistenceTests) ... ok
+test_rejects_current_session_mismatch (test_thermal_calibration.PersistenceTests) ... ok
+test_rejects_invalid_json_nonfinite_constants_and_nonobject (test_thermal_calibration.PersistenceTests) ... ok
+test_rejects_invalid_schema_fields (test_thermal_calibration.PersistenceTests) ... ok
+test_rejects_missing_required_fields (test_thermal_calibration.PersistenceTests) ... ok
+test_roundtrip_schema_and_subpixel_coordinates (test_thermal_calibration.PersistenceTests) ... ok
+test_save_failure_preserves_original_and_cleans_temporary (test_thermal_calibration.PersistenceTests) ... ok
+test_scale_roundtrip_independent_of_geometry (test_thermal_calibration.PersistenceTests) ... ok
+test_stored_rms_is_not_trusted_and_high_error_is_allowed (test_thermal_calibration.PersistenceTests) ... ok
+
+----------------------------------------------------------------------
+Ran 26 tests in 0.116s
+
+OK
+
+Exit code: 0
+
+## IR/RGB GUI
+Command: /usr/bin/python3 -m unittest discover -s src/photo_capture/tests -p test_thermal_calibration_gui.py -v
+test_clean_ir_has_native_data_extent_without_caption_and_preserves_input (test_thermal_calibration_gui.CalibrationHelperTests) ... ok
+test_preview_inverse_rejects_empty_image_and_letterbox (test_thermal_calibration_gui.CalibrationHelperTests) ... ok
+test_runtime_rgb_projection_is_display_only_and_keeps_ir_floor (test_thermal_calibration_gui.CalibrationHelperTests) ... ok
+test_auto_hotspot_preserves_subpixel_coordinates_and_overrides_manual_point (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_changed_live_rgb_size_rejects_frozen_capture_compute_and_verify (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_child_close_is_idempotent_and_does_not_stop_shared_devices (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_compute_button_gate_and_collinear_failure_invalidate_h (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_delete_and_clear_invalidate_parent_and_disable_save_verify (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_freeze_selects_same_pair_when_live_frames_continue_and_records_row_col_temperature (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_gui_load_rejects_wrong_orientation_ir_size_and_missing_h (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_invalid_roi_never_stops_or_constructs_a_session (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_ir_last_pixel_is_valid_and_letterbox_is_not_a_caption_point (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_missing_rgb_and_duplicate_correspondence_do_not_add_rows (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_parent_close_closes_child_and_stops_shared_devices_once (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_real_preview_letterbox_inverse_survives_window_resize (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_reuses_existing_preview_and_never_opens_another_stream (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_roi_rebuild_stops_before_construct_start_and_clears_frozen_old_source (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_save_load_valid_schema_and_reject_current_session_mismatch (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_saving_verified_loaded_h_preserves_matrix_and_created_without_refitting (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_source_generation_change_discards_frozen_selection (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_stale_ir_tick_clears_ir_caches_and_suspends_projection (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_table_review_uses_recorded_pair_and_blocks_accidental_collection (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_twelve_rgb_read_failures_clear_cached_rgb_and_block_new_points (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+test_verify_and_overlays_never_modify_raw_input (test_thermal_calibration_gui.CalibrationWindowTests) ... ok
+
+----------------------------------------------------------------------
+Ran 24 tests in 12.788s
+
+OK
+
+Exit code: 0
+
+## Building/window geometry
+Command: /usr/bin/python3 -m unittest discover -s src/photo_capture/tests -p test_building_windows.py -v
+test_atomic_fsync_failure_preserves_old_file (test_building_windows.FileTests) ... ok
+test_atomic_replace_failure_preserves_old_file_and_cleans_temporary (test_building_windows.FileTests) ... ok
+test_corrupt_payloads_and_metadata_rejected (test_building_windows.FileTests) ... ok
+test_empty_model_binding_is_explicit_not_a_load_bypass (test_building_windows.FileTests) ... ok
+test_incompatible_size_orientation_or_model_rejected (test_building_windows.FileTests) ... ok
+test_invalid_save_does_not_touch_previous_file (test_building_windows.FileTests) ... ok
+test_roundtrip_version_orders_and_fingerprint (test_building_windows.FileTests) ... ok
+test_bad_quadrilaterals_rejected_without_reordering (test_building_windows.GeometryTests) ... ok
+test_gate_uses_smallest_consecutive_floor_spacing (test_building_windows.GeometryTests) ... ok
+test_homography_uses_existing_project_and_cv2 (test_building_windows.GeometryTests) ... ok
+test_invalid_centers_rejected (test_building_windows.GeometryTests) ... ok
+test_invalid_metadata_and_projection_inputs (test_building_windows.GeometryTests) ... ok
+test_known_pixel_coordinates_and_roundtrip (test_building_windows.GeometryTests) ... ok
+test_match_normalized_distance_independent_of_aspect_and_perspective (test_building_windows.GeometryTests) ... ok
+test_match_only_near_centers_inside_facade (test_building_windows.GeometryTests) ... ok
+test_nonuniform_and_noncollinear_centers_allowed (test_building_windows.GeometryTests) ... ok
+test_reference_geometry_must_be_visible_inside_rgb (test_building_windows.GeometryTests) ... ok
+test_template_reprojects_on_new_pose_not_absolute_pixels (test_building_windows.GeometryTests) ... ok
+test_constructor_defaults_and_inherited_thread_submit_latest_close (test_building_windows.PoseTests) ... ok
+test_constructor_validation_closes_real_parent_worker_on_failure (test_building_windows.PoseTests) ... ok
+test_invalid_pose_detections_filtered (test_building_windows.PoseTests) ... ok
+test_missing_local_model_rejected_before_parent_no_download (test_building_windows.PoseTests) ... ok
+test_one_bad_detection_does_not_discard_valid_neighbors (test_building_windows.PoseTests) ... ok
+test_pose_payload_types_and_threshold_inclusive (test_building_windows.PoseTests) ... ok
+
+----------------------------------------------------------------------
+Ran 24 tests in 0.388s
+
+OK
+
+Exit code: 0
+
+## Window annotation GUI
+Command: /usr/bin/python3 -m unittest discover -s src/photo_capture/tests -p test_window_centers_gui.py -v
+test_async_result_rejects_changed_rgb_context (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_async_rgb_disappearing_is_reported_not_an_uncaught_tk_error (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_child_close_cancels_poll_but_does_not_close_shared_devices_or_worker (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_clear_preserves_file_and_frozen_image_and_resets_floor (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_four_points_follow_floor_order_and_explicit_floor_edit (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_incomplete_wrong_floor_order_and_off_facade_cannot_save (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_letterbox_rejected_and_inverse_preserved_across_resize (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_load_displays_centers_on_current_pose_and_new_freeze (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_load_rejects_wrong_size_mirror_and_changed_weights (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_missing_rgb_and_missing_weights_fail_without_constructing_worker (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_model_constructor_failure_is_reported_and_button_reenabled (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_out_of_frame_corners_are_rejected (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_parent_close_cancels_poll_and_closes_shared_worker_exactly_once (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_rgb_size_or_mirror_change_blocks_edit_and_save (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_runtime_candidates_are_geometric_and_never_replace_ir_floor (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_runtime_missing_or_ambiguous_result_invalidates_previous_pose (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_runtime_submissions_pause_while_editor_is_open (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_save_load_standalone_json_preserves_original_h_file_and_ir_state (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_singleton_preview_and_no_device_or_model_load_before_freeze (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_snapshot_and_input_remain_unchanged_while_live_rgb_advances (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_stale_missing_or_context_mismatched_pose_does_not_draw_or_match_floor (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_worker_error_timeout_and_other_request_are_handled (test_window_centers_gui.WindowCentersGuiTests) ... ok
+test_zero_and_multiple_buildings_refuse_selection (test_window_centers_gui.WindowCentersGuiTests) ... ok
+
+----------------------------------------------------------------------
+Ran 23 tests in 13.815s
+
+OK
+
+Exit code: 0
+
+## MLX90640 protocol/decode/session
+Command: /usr/bin/python3 -m unittest discover -s src/mlx90640_ros/test -p test_*.py -v
+test_clips_colors_not_measurements_and_labels_actual_scale (test_color_scale.FixedScaleTests) ... ok
+test_explicit_auto_range_still_works_without_changing_defaults (test_color_scale.FixedScaleTests) ... ok
+test_gui_viewer_and_launch_defaults_match_and_remain_adjustable (test_color_scale.FixedScaleTests) ... ok
+test_same_temperature_keeps_same_color_when_extrema_change (test_color_scale.FixedScaleTests) ... ok
+test_invalid_capture_payload (test_core.CaptureTests) ... ok
+test_real_capture_layout_and_replay (test_core.CaptureTests) ... ok
+test_strict_capture_rejects_damage_and_uart (test_core.CaptureTests) ... ok
+test_bad_pixel_control_register_and_parameters (test_core.DecoderTests) ... ok
+test_bad_pixel_correction_precedes_final_finite_check (test_core.DecoderTests) ... ok
+test_ctypes_default_and_explicit_library (test_core.DecoderTests) ... ok
+test_gap_duplicate_timestamp_and_mode_change (test_core.DecoderTests) ... ok
+test_invalid_subpage_size_and_vendor_errors (test_core.DecoderTests) ... ok
+test_nan_results_clear_pending_pair (test_core.DecoderTests) ... ok
+test_no_eeprom_and_explicit_reset (test_core.DecoderTests) ... ok
+test_pair_no_fixed_warmup_repeat_and_independent_output (test_core.DecoderTests) ... ok
+test_rollover_and_real_time_reversal (test_core.DecoderTests) ... ok
+test_real_capture_temperatures (test_core.NativeCaptureTests) ... ok
+test_crc_standard_check_and_wire_coverage (test_core.ProtocolTests) ... ok
+test_encoder_rejects_invalid_input (test_core.ProtocolTests) ... ok
+test_every_split_and_concatenation (test_core.ProtocolTests) ... ok
+test_noise_bad_crc_unknown_type_length_and_recovery (test_core.ProtocolTests) ... ok
+test_sync_split_and_bounded_noise (test_core.ProtocolTests) ... ok
+test_render_preserves_raw_temperature (test_core.RenderTests) ... ok
+test_bands_parse_and_sort (test_hotspot.FloorMappingTests) ... ok
+test_empty_band_text_is_allowed (test_hotspot.FloorMappingTests) ... ok
+test_floor_for_row_hits_and_nearest (test_hotspot.FloorMappingTests) ... ok
+test_invalid_bands_are_rejected (test_hotspot.FloorMappingTests) ... ok
+test_border_peak_falls_back_to_integer_pixel (test_hotspot.HotspotGeometryTests) ... ok
+test_box_covers_the_hottest_pixels_only (test_hotspot.HotspotGeometryTests) ... ok
+test_flat_frame_is_one_block_not_a_crash (test_hotspot.HotspotGeometryTests) ... ok
+test_invalid_inputs_are_rejected (test_hotspot.HotspotGeometryTests) ... ok
+test_roi_ignores_a_hotter_background (test_hotspot.HotspotGeometryTests) ... ok
+test_subpixel_centre_beats_integer_pixel (test_hotspot.HotspotGeometryTests) ... ok
+test_two_regions_keeps_only_the_hottest (test_hotspot.HotspotGeometryTests) ... ok
+test_wider_delta_grows_the_box (test_hotspot.HotspotGeometryTests) ... ok
+test_payload_and_message_are_consistent (test_hotspot.MessageTests) ... ok
+test_real_capture_hotspot_matches_maximum (test_hotspot.NativeCaptureHotspotTests) ... ok
+test_box_and_shape (test_hotspot.RenderBoxTests) ... ok
+test_invalid_roi (test_hotspot.RoiTests) ... ok
+test_parse_roi (test_hotspot.RoiTests) ... ok
+test_viewer_default_and_opt_out (test_mirror.MirrorOptionsTests) ... ok
+test_only_columns_change_and_gui_uses_the_same_coordinates (test_mirror.MirrorReplayTests) ... ok
+test_replay_topics (test_ros_replay.RosReplayTest) ... skipped 'opt in with MLX90640_ROS_INTEGRATION=1 (starts isolated ROS master)'
+test_record_rebuilds_contiguous_bands (test_thermal_session.FloorTableTests) ... ok
+test_record_rejects_bad_values (test_thermal_session.FloorTableTests) ... ok
+test_record_replaces_existing_floor (test_thermal_session.FloorTableTests) ... ok
+test_text_roundtrip (test_thermal_session.FloorTableTests) ... ok
+test_process_builds_frame_and_summary (test_thermal_session.SessionTests) ... ok
+test_record_floor_uses_explicit_row_and_latest (test_thermal_session.SessionTests) ... ok
+test_replay_session_publishes_latest_frame (test_thermal_session.SessionTests) ... ok
+test_save_snapshot_writes_png_and_json (test_thermal_session.SessionTests) ... ok
+test_invalid_parameters_are_rejected (test_thermal_session.SessionValidationTests) ... ok
+test_source_must_be_exclusive_and_explicit (test_thermal_session.SessionValidationTests) ... ok
+test_encoding_dimensions_shared_stamp_and_no_mutation (test_transport.MessageTests) ... ok
+test_node_rejects_invalid_parameters_before_loading_library (test_transport.MessageTests) ... ok
+test_node_relative_topics_nonlatched_and_replay_grace_period (test_transport.MessageTests) ... ok
+test_calibrated_device_does_not_repeat_eeprom_requests (test_transport.TransportTests) ... ok
+test_crc_and_invalid_header_warnings_are_aggregated_and_throttled (test_transport.TransportTests) ... ok
+test_device_ms_rollback_ready_gate_re_requests_eeprom (test_transport.TransportTests) ... ok
+test_eeprom_retries_once_per_second_and_serial_timeout (test_transport.TransportTests) ... ok
+test_explicit_port_and_no_eager_hardware_access (test_transport.TransportTests) ... ok
+test_frame_value_error_re_requests_without_publishing_old_value (test_transport.TransportTests) ... ok
+test_invalid_eeprom_replies_do_not_bypass_request_rate_limit (test_transport.TransportTests) ... ok
+test_reconnect_clears_parser_decoder_and_input_buffer (test_transport.TransportTests) ... ok
+test_replay_rate_loop_stop_and_reset (test_transport.TransportTests) ... ok
+test_slow_replay_retains_nominal_device_timestamps (test_transport.TransportTests) ... ok
+test_three_seconds_without_valid_frame_resets_and_requests (test_transport.TransportTests) ... ok
+test_cli_source_is_required_and_mutually_exclusive (test_transport.ViewerTests) ... usage: python3 -m unittest [-h] (--port PORT | --capture CAPTURE) [--lib LIB]
+                           [--baud BAUD] [--emissivity EMISSIVITY]
+                           [--tr-shift TR_SHIFT] [--bad-pixels]
+                           [--no-mirror-x] [--headless] [--save-dir SAVE_DIR]
+                           [--save-every SAVE_EVERY] [--scale SCALE]
+                           [--tmin TMIN] [--tmax TMAX] [--duration DURATION]
+                           [--replay-rate REPLAY_RATE] [--loop]
+python3 -m unittest: error: one of the arguments --port --capture is required
+usage: python3 -m unittest [-h] (--port PORT | --capture CAPTURE) [--lib LIB]
+                           [--baud BAUD] [--emissivity EMISSIVITY]
+                           [--tr-shift TR_SHIFT] [--bad-pixels]
+                           [--no-mirror-x] [--headless] [--save-dir SAVE_DIR]
+                           [--save-every SAVE_EVERY] [--scale SCALE]
+                           [--tmin TMIN] [--tmax TMAX] [--duration DURATION]
+                           [--replay-rate REPLAY_RATE] [--loop]
+python3 -m unittest: error: argument --capture: not allowed with argument --port
+ok
+test_save_reports_false_return_and_rejects_repository_path (test_transport.ViewerTests) ... ok
+
+----------------------------------------------------------------------
+Ran 69 tests in 0.787s
+
+OK (skipped=1)
+
+Exit code: 0

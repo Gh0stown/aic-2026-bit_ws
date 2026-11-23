@@ -1,0 +1,853 @@
+[
+  {
+    "name": "crowd_street",
+    "task": "crowd",
+    "point": 2,
+    "sub_id": "A街区",
+    "source": "/home/mowen/Pictures/photo_capture/街区",
+    "note": "2026 街区 A 街视角",
+    "success": true,
+    "result": "A 街区当前视角：社区人员 4 人，非社区人员 0 人，违停电动车 1 辆",
+    "extra": {
+      "block": "A",
+      "person": 4,
+      "bad": 0,
+      "illegal": 1,
+      "cycle": 1,
+      "frames": 2,
+      "per_frame": [
+        {
+          "people": 4,
+          "bad": 0,
+          "cycle": 1
+        },
+        {
+          "people": 4,
+          "bad": 0,
+          "cycle": 1
+        }
+      ],
+      "conf": 0.8,
+      "model": "people_2.pt",
+      "detections": [
+        {
+          "box": [
+            713.2,
+            338.0,
+            776.7,
+            528.5
+          ],
+          "conf": 0.9031,
+          "class": "people"
+        },
+        {
+          "box": [
+            554.0,
+            338.0,
+            611.2,
+            513.9
+          ],
+          "conf": 0.8978,
+          "class": "people"
+        },
+        {
+          "box": [
+            438.9,
+            399.6,
+            739.7,
+            624.4
+          ],
+          "conf": 0.8777,
+          "class": "cycle"
+        },
+        {
+          "box": [
+            368.3,
+            335.4,
+            451.4,
+            529.4
+          ],
+          "conf": 0.872,
+          "class": "people"
+        },
+        {
+          "box": [
+            629.8,
+            345.1,
+            689.7,
+            477.7
+          ],
+          "conf": 0.8326,
+          "class": "people"
+        }
+      ],
+      "raw_image": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/crowd_street/20261122_201935/p02_crowd_A街区_raw_201942_416.jpg",
+      "request_id": "auto-crowd-p2-201936_010",
+      "elapsed": 6.412
+    },
+    "elapsed": 6.413,
+    "annotated": "crowd_street_annotated.jpg",
+    "raw": "crowd_street_raw.jpg",
+    "recognitions": "crowd_street_recognitions.jsonl"
+  },
+  {
+    "name": "crowd_b_street",
+    "task": "crowd",
+    "point": 8,
+    "sub_id": "B街区",
+    "source": "/home/mowen/Pictures/photo_capture/街区1/街区1_20261110_201443_282_0541.jpg",
+    "note": "2026 街区 B 街视角（取序列中间帧，立牌同时含社区/非社区）",
+    "success": true,
+    "result": "B 街区当前视角：社区人员 2 人，非社区人员 1 人，违停电动车 1 辆",
+    "extra": {
+      "block": "B",
+      "person": 2,
+      "bad": 1,
+      "illegal": 1,
+      "cycle": 1,
+      "frames": 2,
+      "per_frame": [
+        {
+          "people": 2,
+          "bad": 1,
+          "cycle": 1
+        },
+        {
+          "people": 2,
+          "bad": 1,
+          "cycle": 1
+        }
+      ],
+      "conf": 0.8,
+      "model": "people_2.pt",
+      "detections": [
+        {
+          "box": [
+            442.7,
+            494.8,
+            743.2,
+            631.3
+          ],
+          "conf": 0.8742,
+          "class": "cycle"
+        },
+        {
+          "box": [
+            384.0,
+            336.5,
+            471.1,
+            533.2
+          ],
+          "conf": 0.8534,
+          "class": "bad"
+        },
+        {
+          "box": [
+            612.5,
+            336.2,
+            685.1,
+            521.5
+          ],
+          "conf": 0.8443,
+          "class": "people"
+        },
+        {
+          "box": [
+            508.1,
+            340.1,
+            574.3,
+            522.5
+          ],
+          "conf": 0.8017,
+          "class": "people"
+        }
+      ],
+      "raw_image": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/crowd_b_street/20261122_201943/p08_crowd_B街区_raw_201950_214.jpg",
+      "request_id": "auto-crowd-p8-201943_760",
+      "elapsed": 6.461
+    },
+    "elapsed": 6.462,
+    "annotated": "crowd_b_street_annotated.jpg",
+    "raw": "crowd_b_street_raw.jpg",
+    "recognitions": "crowd_b_street_recognitions.jsonl"
+  },
+  {
+    "name": "crowd_noncommunity",
+    "task": "crowd",
+    "point": 2,
+    "sub_id": "A街区",
+    "source": "/home/mowen/Pictures/photo_capture/非社区人员补充",
+    "note": "2026 非社区人员补充样图",
+    "success": true,
+    "result": "A 街区当前视角：社区人员 0 人，非社区人员 2 人，违停电动车 1 辆",
+    "extra": {
+      "block": "A",
+      "person": 0,
+      "bad": 2,
+      "illegal": 1,
+      "cycle": 1,
+      "frames": 2,
+      "per_frame": [
+        {
+          "people": 0,
+          "bad": 2,
+          "cycle": 1
+        },
+        {
+          "people": 0,
+          "bad": 2,
+          "cycle": 1
+        }
+      ],
+      "conf": 0.8,
+      "model": "people_2.pt",
+      "detections": [
+        {
+          "box": [
+            418.5,
+            338.3,
+            508.5,
+            572.2
+          ],
+          "conf": 0.9433,
+          "class": "bad"
+        },
+        {
+          "box": [
+            179.1,
+            596.9,
+            625.6,
+            717.1
+          ],
+          "conf": 0.9313,
+          "class": "cycle"
+        },
+        {
+          "box": [
+            776.2,
+            339.5,
+            859.4,
+            568.7
+          ],
+          "conf": 0.9003,
+          "class": "bad"
+        }
+      ],
+      "raw_image": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/crowd_noncommunity/20261122_201951/p02_crowd_A街区_raw_201958_478.jpg",
+      "request_id": "auto-crowd-p2-201951_585",
+      "elapsed": 6.9
+    },
+    "elapsed": 6.901,
+    "annotated": "crowd_noncommunity_annotated.jpg",
+    "raw": "crowd_noncommunity_raw.jpg",
+    "recognitions": "crowd_noncommunity_recognitions.jsonl"
+  },
+  {
+    "name": "sign",
+    "task": "sign",
+    "point": 4,
+    "sub_id": "A街区",
+    "source": "/home/mowen/Pictures/photo_capture/禁止通行标识",
+    "note": "2026 禁止通行指示牌（A 摆位）",
+    "success": true,
+    "result": "前方是禁止直行指示牌",
+    "extra": {
+      "side": "A",
+      "orientation": "正面",
+      "route": "left",
+      "votes": {
+        "A": 3
+      },
+      "frames": 3,
+      "required_votes": 2,
+      "confidence": 0.975,
+      "confirm_hit": true,
+      "confirm_conf": 0.946,
+      "per_frame": [
+        {
+          "side": "A",
+          "conf": 0.975
+        },
+        {
+          "side": "A",
+          "conf": 0.975
+        },
+        {
+          "side": "A",
+          "conf": 0.975
+        }
+      ],
+      "raw_image": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/sign/20261123_153723/p04_sign_A街区_raw_153726_531.jpg",
+      "request_id": "auto-sign-p4-153723_865",
+      "elapsed": 2.667
+    },
+    "elapsed": 2.668,
+    "annotated": "sign_annotated.jpg",
+    "raw": "sign_raw.jpg",
+    "recognitions": "sign_recognitions.jsonl"
+  },
+  {
+    "name": "light_false_positive",
+    "task": "light",
+    "point": 1,
+    "sub_id": "红绿灯1",
+    "source": "/home/mowen/Pictures/photo_capture/街区",
+    "note": "误检：街景禁止直行牌被判红灯",
+    "success": true,
+    "result": "红灯",
+    "extra": {
+      "color": "red",
+      "text": "前方红灯，停车等待",
+      "votes": {
+        "红灯": 3
+      },
+      "frames": 3,
+      "required_votes": 2,
+      "confidence": 0.688,
+      "request_id": "auto-light-p1-193701_885",
+      "elapsed": 5.351
+    },
+    "elapsed": 5.352,
+    "annotated": "light_false_positive_annotated.jpg",
+    "raw": "light_false_positive_raw.jpg",
+    "recognitions": "light_false_positive_recognitions.jsonl"
+  },
+  {
+    "name": "trash",
+    "task": "trash",
+    "point": 15,
+    "sub_id": "垃圾桶",
+    "source": "/home/mowen/Pictures/photo_capture/垃圾1",
+    "note": "2026 四桶同框（trash_1.pt）",
+    "success": true,
+    "result": "厨余垃圾桶状态为关闭，垃圾桶里的垃圾为荧光灯，投放错误；有害垃圾桶状态为关闭，垃圾桶里的垃圾为破陶瓷，投放错误；其他垃圾桶状态为关闭，垃圾桶里的垃圾为塑料瓶，投放错误；可回收物垃圾桶状态为关闭，垃圾桶里的垃圾为面包，投放错误",
+    "extra": {
+      "count": 4,
+      "detected": 4,
+      "expected": 4,
+      "bins": [
+        {
+          "type": "厨余",
+          "category": "厨余垃圾",
+          "state": "close",
+          "state_text": "关闭",
+          "item": "荧光灯",
+          "items": [
+            "荧光灯"
+          ],
+          "correct": false,
+          "conf": 0.579,
+          "item_conf": 0.971,
+          "box": [
+            519,
+            380,
+            631,
+            567
+          ]
+        },
+        {
+          "type": "有害",
+          "category": "有害垃圾",
+          "state": "close",
+          "state_text": "关闭",
+          "item": "破陶瓷",
+          "items": [
+            "破陶瓷"
+          ],
+          "correct": false,
+          "conf": 0.677,
+          "item_conf": 0.952,
+          "box": [
+            635,
+            375,
+            753,
+            574
+          ]
+        },
+        {
+          "type": "其他",
+          "category": "其他垃圾",
+          "state": "close",
+          "state_text": "关闭",
+          "item": "塑料瓶",
+          "items": [
+            "塑料瓶"
+          ],
+          "correct": false,
+          "conf": 0.733,
+          "item_conf": 0.955,
+          "box": [
+            758,
+            381,
+            870,
+            575
+          ]
+        },
+        {
+          "type": "可回收物",
+          "category": "可回收物",
+          "state": "close",
+          "state_text": "关闭",
+          "item": "面包",
+          "items": [
+            "面包"
+          ],
+          "correct": false,
+          "conf": 0.853,
+          "item_conf": 0.964,
+          "box": [
+            872,
+            377,
+            1004,
+            569
+          ]
+        }
+      ],
+      "frames": 2,
+      "raw_image": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/trash/20261122_193708/p15_trash_垃圾桶_raw_193715_344.jpg",
+      "request_id": "auto-trash-p15-193708_552",
+      "elapsed": 6.808
+    },
+    "elapsed": 6.81,
+    "annotated": "trash_annotated.jpg",
+    "raw": "trash_raw.jpg",
+    "recognitions": "trash_recognitions.jsonl"
+  },
+  {
+    "name": "fire",
+    "task": "fire",
+    "point": 7,
+    "sub_id": "楼宇A",
+    "source": "/home/mowen/Pictures/photo_capture/火焰/火焰_20261114_210221_825_0001.jpg",
+    "note": "2026 楼宇墙面火源（单楼体）",
+    "success": true,
+    "result": "A大厦发现火灾隐患 2 个",
+    "extra": {
+      "building": "A",
+      "count": 2,
+      "fire_total": 2,
+      "other_count": 0,
+      "building_source": "largest",
+      "target_region": [
+        483,
+        49,
+        730,
+        577
+      ],
+      "buildings": [
+        {
+          "box": [
+            483,
+            49,
+            730,
+            577
+          ],
+          "conf": 0.958,
+          "ocr_text": "",
+          "matched": "",
+          "ocr_message": "未识别到文字",
+          "is_target": true,
+          "fire_count": 2
+        }
+      ],
+      "conf": 0.25,
+      "raw_image": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/fire/20261122_194220/p07_fire_楼宇A_raw_194225_058.jpg",
+      "request_id": "auto-fire-p7-194220_596",
+      "elapsed": 4.466
+    },
+    "elapsed": 4.467,
+    "annotated": "fire_annotated.jpg",
+    "raw": "fire_raw.jpg",
+    "recognitions": "fire_recognitions.jsonl"
+  },
+  {
+    "name": "fire_multi_building",
+    "task": "fire",
+    "point": 7,
+    "sub_id": "楼宇A",
+    "source": "/home/mowen/Pictures/photo_capture/火焰/火焰_20261114_210818_594_0100.jpg",
+    "note": "2026 多楼体同框（只计目标楼体）",
+    "success": true,
+    "result": "A大厦发现火灾隐患 3 个",
+    "extra": {
+      "building": "A",
+      "count": 3,
+      "fire_total": 4,
+      "other_count": 1,
+      "building_source": "largest",
+      "target_region": [
+        476,
+        19,
+        760,
+        533
+      ],
+      "buildings": [
+        {
+          "box": [
+            476,
+            19,
+            760,
+            533
+          ],
+          "conf": 0.954,
+          "ocr_text": "",
+          "matched": "",
+          "ocr_message": "未识别到文字",
+          "is_target": true,
+          "fire_count": 3
+        }
+      ],
+      "conf": 0.25,
+      "raw_image": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/fire_multi_building/20261122_194225/p07_fire_楼宇A_raw_194230_461.jpg",
+      "request_id": "auto-fire-p7-194225_946",
+      "elapsed": 4.52
+    },
+    "elapsed": 4.52,
+    "annotated": "fire_multi_building_annotated.jpg",
+    "raw": "fire_multi_building_raw.jpg",
+    "recognitions": "fire_multi_building_recognitions.jsonl"
+  },
+  {
+    "name": "plate",
+    "task": "plate",
+    "point": 14,
+    "sub_id": "1号停车位",
+    "source": "/home/mowen/Pictures/photo_capture/车牌",
+    "note": "2026 沙盘车牌样图",
+    "success": true,
+    "result": "1号停车场车牌号为 学B5B5T3",
+    "extra": {
+      "parking": "1",
+      "plate": "学B5B5T3",
+      "ocr_mode": "plate_crop",
+      "ocr_confidence": 0.889,
+      "box": [
+        617,
+        359,
+        768,
+        405
+      ],
+      "aspect": 3.29,
+      "score": 3.469,
+      "candidates": [
+        {
+          "text": "学B5B5T3",
+          "score": 3.469,
+          "confidence": 0.889,
+          "aspect": 3.29,
+          "box": [
+            617,
+            359,
+            768,
+            405
+          ],
+          "frame": 0
+        },
+        {
+          "text": "学B5B5T3",
+          "score": 3.469,
+          "confidence": 0.889,
+          "aspect": 3.29,
+          "box": [
+            617,
+            359,
+            768,
+            405
+          ],
+          "frame": 1
+        }
+      ],
+      "frames": 2,
+      "raw_image": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/plate/20261122_193738/p14_plate_1号停车位_raw_193748_177.jpg",
+      "request_id": "auto-plate-p14-193738_859",
+      "elapsed": 9.325
+    },
+    "elapsed": 9.325,
+    "annotated": "plate_annotated.jpg",
+    "raw": "plate_raw.jpg",
+    "recognitions": "plate_recognitions.jsonl"
+  },
+  {
+    "name": "plate_field_p14",
+    "task": "plate",
+    "point": 14,
+    "sub_id": "1号停车位",
+    "source": "/home/mowen/Pictures/inspection_2026/20261122_191108/p14_plate_1号停车位_raw_191550_913.jpg",
+    "note": "现场 p14 原错误拼接帧（修复后只取一框）",
+    "success": true,
+    "result": "1号停车场车牌号为 学C88K55",
+    "extra": {
+      "parking": "1",
+      "plate": "学C88K55",
+      "ocr_mode": "plate_crop",
+      "ocr_confidence": 0.967,
+      "box": [
+        982,
+        531,
+        1220,
+        610
+      ],
+      "aspect": 2.98,
+      "score": 3.607,
+      "candidates": [
+        {
+          "text": "学C88K55",
+          "score": 3.607,
+          "confidence": 0.967,
+          "aspect": 2.98,
+          "box": [
+            982,
+            531,
+            1220,
+            610
+          ],
+          "frame": 0
+        },
+        {
+          "text": "学C88K55",
+          "score": 3.607,
+          "confidence": 0.967,
+          "aspect": 2.98,
+          "box": [
+            982,
+            531,
+            1220,
+            610
+          ],
+          "frame": 1
+        }
+      ],
+      "frames": 2,
+      "raw_image": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/plate_field_p14/20261122_193749/p14_plate_1号停车位_raw_193759_406.jpg",
+      "request_id": "auto-plate-p14-193749_827",
+      "elapsed": 9.597
+    },
+    "elapsed": 9.597,
+    "annotated": "plate_field_p14_annotated.jpg",
+    "raw": "plate_field_p14_raw.jpg",
+    "recognitions": "plate_field_p14_recognitions.jsonl"
+  },
+  {
+    "name": "ebike_parking",
+    "task": "ebike",
+    "point": 17,
+    "sub_id": "停车区",
+    "source": "/home/mowen/Pictures/photo_capture/电动车",
+    "note": "2026 停车区电动车样图",
+    "success": true,
+    "result": "停车区内电动车正常 3 辆，倒伏 0 辆",
+    "extra": {
+      "mode": "parking",
+      "normal": 3,
+      "fall": 0,
+      "frame_count": 1,
+      "model": "Cycle.pt",
+      "detections": [
+        {
+          "box": [
+            872.5,
+            404.9,
+            1023.2,
+            606.3
+          ],
+          "conf": 0.977,
+          "class": "UP"
+        },
+        {
+          "box": [
+            192.6,
+            400.0,
+            353.1,
+            591.6
+          ],
+          "conf": 0.9681,
+          "class": "UP"
+        },
+        {
+          "box": [
+            569.6,
+            401.7,
+            670.6,
+            602.5
+          ],
+          "conf": 0.9485,
+          "class": "UP"
+        }
+      ],
+      "raw_image": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/ebike_parking/20261122_193801/p17_ebike_停车区_raw_193805_662.jpg",
+      "request_id": "auto-ebike-p17-193801_125",
+      "elapsed": 4.543
+    },
+    "elapsed": 4.544,
+    "annotated": "ebike_parking_annotated.jpg",
+    "raw": "ebike_parking_raw.jpg",
+    "recognitions": "ebike_parking_recognitions.jsonl"
+  },
+  {
+    "name": "ebike_street",
+    "task": "ebike",
+    "point": 2,
+    "sub_id": "A街区",
+    "source": "/home/mowen/Pictures/photo_capture/街区",
+    "note": "2026 街区违停电动车样图",
+    "success": true,
+    "result": "A 街区有 1 辆电动车违停",
+    "extra": {
+      "mode": "street",
+      "block": "A",
+      "illegal": 1,
+      "count": 1,
+      "model": "people_2.pt",
+      "detections": [
+        {
+          "box": [
+            438.9,
+            399.6,
+            739.7,
+            624.4
+          ],
+          "conf": 0.8777,
+          "class": "cycle"
+        }
+      ],
+      "raw_image": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/ebike_street/20261122_193806/p02_ebike_A街区_raw_193811_486.jpg",
+      "request_id": "auto-ebike-p2-193806_926",
+      "elapsed": 4.567
+    },
+    "elapsed": 4.567,
+    "annotated": "ebike_street_annotated.jpg",
+    "raw": "ebike_street_raw.jpg",
+    "recognitions": "ebike_street_recognitions.jsonl"
+  },
+  {
+    "name": "meter",
+    "task": "meter",
+    "point": 10,
+    "sub_id": "站房",
+    "source": "/home/mowen/Pictures/photo_capture/最终机位拍摄仪表",
+    "note": "2026 新机位温湿度表样图",
+    "success": true,
+    "result": "温度表读数为 15 度。湿度表度数为 42%。电表读数为 123.4 kWh。",
+    "extra": {
+      "temperature": {
+        "value": 15.0,
+        "status": "ok",
+        "valid_count": 10,
+        "inlier_count": 10
+      },
+      "humidity": {
+        "value": 42.0,
+        "status": "ok",
+        "valid_count": 10,
+        "inlier_count": 10
+      },
+      "frame_count": 10,
+      "sampled_frames": 10,
+      "valid_frames": 10,
+      "rounds": [
+        {
+          "attempts": 10,
+          "valid": 10,
+          "stable": true
+        }
+      ],
+      "elapsed_ms": 6913,
+      "electric": {
+        "ok": true,
+        "value": "123.4",
+        "unit": "kWh",
+        "text": "123.4 kWh",
+        "raw_text": "123.4 kWh",
+        "message": "电表读数",
+        "model": "voltage.pt",
+        "attempts": 1
+      },
+      "log": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/meter/20261123_150503/recognitions.jsonl",
+      "model": "gauge_exp16.pt",
+      "request_id": "auto-meter-p10-150503_012",
+      "elapsed": 8.951
+    },
+    "elapsed": 8.952,
+    "annotated": "meter_annotated.jpg",
+    "raw": "meter_raw.jpg",
+    "recognitions": "meter_recognitions.jsonl",
+    "annotated_voltage": "meter_voltage_annotated.jpg"
+  },
+  {
+    "name": "temperature",
+    "task": "temperature",
+    "point": 12,
+    "sub_id": "楼宇D",
+    "source": "/home/mowen/Pictures/photo_capture/楼宇D/楼宇D_20261113_203902_459_0001.jpg",
+    "note": "楼宇D RGB + capture.bin 红外回放：ROI 内热点 + 双光图（非同一现场）",
+    "success": true,
+    "result": "D大楼在 1 楼处发现高温情况",
+    "extra": {
+      "building": "D",
+      "floor": 1,
+      "floor_raw": "1F",
+      "row_index": 15,
+      "row": 14.558,
+      "col": 16.015,
+      "peak_c": 23.401,
+      "ambient": 29.563,
+      "frame_count": 3,
+      "roi_ir": [
+        6,
+        14,
+        16,
+        22
+      ],
+      "roi_source": "calibration",
+      "roi_area": 75,
+      "floors": 4,
+      "floor_mode": "building",
+      "floor_t": 0.937,
+      "tmin": 20.0,
+      "tmax": 35.0,
+      "building_d": {
+        "conf": 0.96,
+        "box": [
+          598.7,
+          136.4,
+          891.2,
+          534.6
+        ],
+        "quad": [
+          [
+            618.8146362304688,
+            148.53387451171875
+          ],
+          [
+            875.7572631835938,
+            150.4578094482422
+          ],
+          [
+            871.313720703125,
+            518.8627319335938
+          ],
+          [
+            613.1426391601562,
+            518.7415161132812
+          ]
+        ]
+      },
+      "dual_image": "/home/mowen/bit_ws/docs/technical_report/assets/vision/_tmp/temperature/20261122_195958/p12_temperature_楼宇D_dual_200008_150.jpg",
+      "floor_table": "4F:0-5,3F:6-11,2F:12-17,1F:18-23",
+      "calibration": {
+        "file": "/home/mowen/Pictures/photo_capture/红外热像/calibration.json",
+        "rgb_size": [
+          1280,
+          720
+        ],
+        "rms_px": 4.46
+      },
+      "request_id": "auto-temperature-p12-195958_754",
+      "elapsed": 9.466
+    },
+    "elapsed": 9.466,
+    "annotated": "temperature_annotated.jpg",
+    "raw": "temperature_raw.jpg",
+    "recognitions": "temperature_recognitions.jsonl"
+  }
+]

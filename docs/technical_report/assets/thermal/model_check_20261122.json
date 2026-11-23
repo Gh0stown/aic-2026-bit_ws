@@ -1,0 +1,152 @@
+{
+  "prepared_for": "2026-11-22 report material; not a competition benchmark",
+  "task": "pose",
+  "names": {
+    "0": "building"
+  },
+  "kpt_shape": [
+    4,
+    3
+  ],
+  "architecture": "yolov8n-pose.yaml",
+  "model_sha256": "12bede235798fb020ea113ec26f115a6a4b7c8dfb588c0cb541af2df2ec25edb",
+  "template_fingerprint_verified": true,
+  "calibration_fit_rms_recomputed_px": 4.460363096616663,
+  "test_conditions": {
+    "device": "cpu",
+    "torch_threads": 2,
+    "imgsz": 960,
+    "box_and_each_corner_conf_min": 0.5,
+    "trained_or_test_overlap": "unknown",
+    "training_dataset_counts": "not provided",
+    "ground_truth": "none; no correctness/error-rate denominator"
+  },
+  "records": [
+    {
+      "image": "thermal_20261113_151634_517_rgb.png",
+      "rgb_crop": {
+        "x": 846,
+        "y": 26,
+        "width": 1280,
+        "height": 720
+      },
+      "detections": 1,
+      "speed_ms": {
+        "preprocess": 7.156039000165038,
+        "inference": 180.2498829997603,
+        "postprocess": 1.4342409999699157
+      },
+      "ground_truth_floor": null,
+      "evaluation": "unlabelled stored-image sanity check, not held-out accuracy or live end-to-end timing",
+      "confidence": 0.9636092782020569,
+      "corners_tl_tr_br_bl": [
+        [
+          571.730712890625,
+          133.57894897460938
+        ],
+        [
+          854.5252075195312,
+          143.1855926513672
+        ],
+        [
+          850.6500854492188,
+          529.6493530273438
+        ],
+        [
+          571.4393310546875,
+          527.0352783203125
+        ]
+      ],
+      "corner_conf": [
+        0.9554752111434937,
+        0.9627549648284912,
+        0.973739504814148,
+        0.976403534412384
+      ],
+      "window_centers_rgb": {
+        "1F": [
+          719.8106301529517,
+          479.57628431471153
+        ],
+        "2F": [
+          715.0892117560959,
+          379.8324352502811
+        ],
+        "3F": [
+          711.3279685010898,
+          282.95260995882734
+        ],
+        "4F": [
+          709.4889249593884,
+          185.21828492346717
+        ]
+      }
+    },
+    {
+      "image": "thermal_20261122_171720_558_rgb.png",
+      "rgb_crop": {
+        "x": 846,
+        "y": 26,
+        "width": 1280,
+        "height": 720
+      },
+      "detections": 1,
+      "speed_ms": {
+        "preprocess": 4.028867999750219,
+        "inference": 163.26065400016887,
+        "postprocess": 1.0661910000635544
+      },
+      "ground_truth_floor": null,
+      "evaluation": "unlabelled stored-image sanity check, not held-out accuracy or live end-to-end timing",
+      "confidence": 0.9595468640327454,
+      "corners_tl_tr_br_bl": [
+        [
+          476.1258239746094,
+          107.73345947265625
+        ],
+        [
+          759.67919921875,
+          117.22689056396484
+        ],
+        [
+          751.5442504882812,
+          532.4541015625
+        ],
+        [
+          463.556884765625,
+          532.6419067382812
+        ]
+      ],
+      "corner_conf": [
+        0.9761077761650085,
+        0.9811904430389404,
+        0.9820761680603027,
+        0.9853648543357849
+      ],
+      "window_centers_rgb": {
+        "1F": [
+          618.0278019232446,
+          478.6544163190814
+        ],
+        "2F": [
+          615.275558505687,
+          369.8133770043724
+        ],
+        "3F": [
+          613.4747023516371,
+          265.5342370437131
+        ],
+        "4F": [
+          613.6511640075203,
+          161.74267145954053
+        ]
+      },
+      "projected_hotspot_rgb": [
+        606.4584574063401,
+        378.17317069659805
+      ],
+      "legacy_ir_row_floor": "3F",
+      "offline_geometric_candidate": "2F"
+    }
+  ]
+}

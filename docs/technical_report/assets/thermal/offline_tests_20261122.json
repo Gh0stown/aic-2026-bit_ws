@@ -1,0 +1,77 @@
+[
+  {
+    "suite": "IR/RGB geometry",
+    "command": [
+      "/usr/bin/python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "src/photo_capture/tests",
+      "-p",
+      "test_thermal_calibration.py",
+      "-v"
+    ],
+    "exit_code": 0
+  },
+  {
+    "suite": "IR/RGB GUI",
+    "command": [
+      "/usr/bin/python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "src/photo_capture/tests",
+      "-p",
+      "test_thermal_calibration_gui.py",
+      "-v"
+    ],
+    "exit_code": 0
+  },
+  {
+    "suite": "Building/window geometry",
+    "command": [
+      "/usr/bin/python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "src/photo_capture/tests",
+      "-p",
+      "test_building_windows.py",
+      "-v"
+    ],
+    "exit_code": 0
+  },
+  {
+    "suite": "Window annotation GUI",
+    "command": [
+      "/usr/bin/python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "src/photo_capture/tests",
+      "-p",
+      "test_window_centers_gui.py",
+      "-v"
+    ],
+    "exit_code": 0
+  },
+  {
+    "suite": "MLX90640 protocol/decode/session",
+    "command": [
+      "/usr/bin/python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "src/mlx90640_ros/test",
+      "-p",
+      "test_*.py",
+      "-v"
+    ],
+    "exit_code": 0
+  }
+]

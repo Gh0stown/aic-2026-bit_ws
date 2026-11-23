@@ -1,0 +1,69 @@
+{
+  "prepared_at": "2026-11-22T17:40:21.476403+08:00",
+  "head": "cdbbf0f790e635d15ff27afeefc877dd0f74472a",
+  "scope": "thermal evidence only; raw copies are not labelled accuracy results",
+  "files": [
+    {
+      "file": "calibration.json",
+      "original_path": "/home/mowen/Pictures/photo_capture/红外热像/calibration.json",
+      "bytes": 819,
+      "sha256": "21b379976d287be00e81c1f3d2acf137f95825d1bdb9fd5f9de8b83570dc636f",
+      "copy": "verbatim; not annotated or resized"
+    },
+    {
+      "file": "window_centers.json",
+      "original_path": "/home/mowen/Pictures/photo_capture/红外热像/window_centers.json",
+      "bytes": 1163,
+      "sha256": "a1fb34e52460e32cdb87a8c5c72ecb7f4be875cb2b8de7e7b7cb52665e62860e",
+      "copy": "verbatim; not annotated or resized"
+    },
+    {
+      "file": "thermal_20261113_151634_517.png",
+      "original_path": "/home/mowen/Pictures/photo_capture/红外热像/thermal_20261113_151634_517.png",
+      "bytes": 33833,
+      "sha256": "1a99832a0347589bfc35174e125c8dbf113ad31935bde562f1ccbce8c306dc9d",
+      "copy": "verbatim; not annotated or resized"
+    },
+    {
+      "file": "thermal_20261113_151634_517.json",
+      "original_path": "/home/mowen/Pictures/photo_capture/红外热像/thermal_20261113_151634_517.json",
+      "bytes": 209,
+      "sha256": "ffb1f4468840e051b1a23d8a434b8238bc360a8430a1c84399712af115c63ed2",
+      "copy": "verbatim; not annotated or resized"
+    },
+    {
+      "file": "thermal_20261113_151634_517_rgb.png",
+      "original_path": "/home/mowen/Pictures/photo_capture/红外热像/thermal_20261113_151634_517_rgb.png",
+      "bytes": 1566480,
+      "sha256": "aae00b2172ca19cef964402ed41a5b048a8deb48eb131d1fad4f1b2ea73a8657",
+      "copy": "verbatim; not annotated or resized"
+    },
+    {
+      "file": "thermal_20261122_171720_558.png",
+      "original_path": "/home/mowen/Pictures/photo_capture/红外热像/thermal_20261122_171720_558.png",
+      "bytes": 10636,
+      "sha256": "3b3f9d06491dddd777d9f556888f66b5ce741436db953f4a7c852d3275c31db0",
+      "copy": "verbatim; not annotated or resized"
+    },
+    {
+      "file": "thermal_20261122_171720_558.json",
+      "original_path": "/home/mowen/Pictures/photo_capture/红外热像/thermal_20261122_171720_558.json",
+      "bytes": 211,
+      "sha256": "d7a50746024c1460e15eb07dbf5d882467ca6eaa71acd2ae15d0314e1f922672",
+      "copy": "verbatim; not annotated or resized"
+    },
+    {
+      "file": "thermal_20261122_171720_558_rgb.png",
+      "original_path": "/home/mowen/Pictures/photo_capture/红外热像/thermal_20261122_171720_558_rgb.png",
+      "bytes": 1356269,
+      "sha256": "44ebf60e9e1bdf314558563821f65a0611d9a55064607f406a7327ce1c0407b1",
+      "copy": "verbatim; not annotated or resized"
+    }
+  ],
+  "external_model": {
+    "path": "/home/mowen/AI视觉/building_d.pt",
+    "bytes": 6439896,
+    "sha256": "12bede235798fb020ea113ec26f115a6a4b7c8dfb588c0cb541af2df2ec25edb",
+    "included": false
+  }
+}
