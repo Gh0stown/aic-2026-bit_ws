@@ -13,6 +13,9 @@
 和 ④ 等价，不要重复开。关闭本面板不会停止已启动的进程，请用「全部停止」或
 各步骤右侧的「停止」（发 SIGINT，等同 Ctrl+C，底盘会先发零速再退出）。
 
+「停止」会顺便关掉这一步的终端窗口，「全部停止」也会清理残留窗口，反复测试
+不会堆一屏终端。控制台路线默认 match（比赛按 4 号指示牌自动接 left / straight）。
+
 面板底部「提示 / 报错处理」里写了：需要展示哪些终端、报错先停止再重开
 （比如 rviz 雷达报错，重开 ① 基本就好）、以及不要重复开进程等注意事项。
 
@@ -29,6 +32,7 @@
 
 import os
 import queue
+import re
 import shlex
 import shutil
 import signal
@@ -81,6 +85,14 @@ STEPS = {
 }
 RV_PATTERN = r'rviz .*single_nav\.rviz'
 
+# 每个步骤打开的终端窗口标题前缀；停止时按标题前缀把对应窗口一起关掉。
+WINDOW_PREFIX = {
+    1: 'bit_ws ①',
+    2: 'bit_ws ②',
+    3: 'bit_ws ③',
+    4: 'bit_ws ④',
+}
+
 # 配色
 BG = '#eef2f7'
 HEADER_BG = '#1f2d3d'
@@ -112,8 +124,10 @@ HELP_SECTIONS = [
     ]),
     ('注意', [
         '重开前一定先停止，不要同时开两个 roslaunch 或两个 /inspection_vision。',
+        '「停止」会同时关掉这一步的终端窗口；「全部停止」会把残留的终端窗口一起清掉。',
         '控制台里的「启动视觉」和 ④ 等价，别重复点。',
         '关闭面板不会停进程；收工请用「全部停止」。',
+        '默认控制台路线是 match，按比赛自动接 left / straight。',
         '自检：python3 ~/桌面/bit_ws_start.py --check',
     ]),
 ]
@@ -212,6 +226,88 @@ def terminate(pids, log, grace=6.0):
     log('已强制结束（SIGKILL）。')
 
 
+def find_step_windows(prefixes):
+    """用 xwininfo 找标题以 prefixes 开头的终端窗口，返回窗口 id 列表。"""
+    try:
+        result = subprocess.run(['xwininfo', '-root', '-tree'],
+                                capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    windows = []
+    for line in result.stdout.splitlines():
+        match = re.match(r'\s+(0x[0-9a-fA-F]+)\s+"([^"]*)"', line)
+        if not match:
+            continue
+        name = match.group(2)
+        if any(name.startswith(prefix) for prefix in prefixes):
+            windows.append(int(match.group(1), 16))
+    return windows
+
+
+def _send_wm_delete(window_id):
+    """给窗口发 WM_DELETE_WINDOW，效果等同点终端窗口的关闭按钮。"""
+    display = None
+    try:
+        import ctypes
+        x11 = ctypes.CDLL('libX11.so.6')
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XInternAtom.restype = ctypes.c_ulong
+        x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        x11.XSendEvent.restype = ctypes.c_int
+        x11.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,
+                                   ctypes.c_long, ctypes.c_void_p]
+        x11.XFlush.argtypes = [ctypes.c_void_p]
+        x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        display = x11.XOpenDisplay(None)
+        if not display:
+            return False
+        protocols = x11.XInternAtom(display, b'WM_PROTOCOLS', 0)
+        delete = x11.XInternAtom(display, b'WM_DELETE_WINDOW', 0)
+        event = ctypes.create_string_buffer(192)
+        ctypes.c_int.from_buffer(event, 0).value = 33
+        ctypes.c_ulong.from_buffer(event, 8).value = 0
+        ctypes.c_int.from_buffer(event, 16).value = 0
+        ctypes.c_void_p.from_buffer(event, 24).value = display
+        ctypes.c_ulong.from_buffer(event, 32).value = window_id
+        ctypes.c_ulong.from_buffer(event, 40).value = protocols
+        ctypes.c_int.from_buffer(event, 48).value = 32
+        ctypes.c_ulong.from_buffer(event, 56).value = delete
+        ctypes.c_ulong.from_buffer(event, 64).value = 0
+        ok = bool(x11.XSendEvent(display, window_id, 0, 0, event))
+        x11.XFlush(display)
+        return ok
+    except Exception:
+        return False
+    finally:
+        if display is not None:
+            try:
+                x11.XCloseDisplay(display)
+            except Exception:
+                pass
+
+
+def close_step_windows(sid, log, wait=2.0):
+    """关掉某一步的终端窗口；返回找到的窗口数（0 表示本来就没开）。"""
+    prefixes = [WINDOW_PREFIX[sid]]
+    windows = find_step_windows(prefixes)
+    if not windows:
+        return 0
+    for window in windows:
+        _send_wm_delete(window)
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if not find_step_windows(prefixes):
+            break
+        time.sleep(0.1)
+    left = find_step_windows(prefixes)
+    if left:
+        log('已结束进程，但还有 %d 个终端窗口没关掉，可以手动关。' % len(left))
+    else:
+        log('已关闭对应终端窗口。')
+    return len(windows)
+
+
 def build_terminal_argv(title, command):
     """生成「新开终端并执行命令」的 argv；找不到终端返回 None。"""
     inner = (
@@ -280,7 +376,7 @@ class LauncherApp(object):
         self.routes = load_routes()
         self.console_kind = tk.StringVar(value='test')
         self.route = tk.StringVar(
-            value='left' if 'left' in self.routes else self.routes[0])
+            value='match' if 'match' in self.routes else self.routes[0])
         self.launching_until = {}
         self.stopping = set()
         self.match_queue = []
@@ -665,7 +761,6 @@ class LauncherApp(object):
                 return False
             command = 'rosrun nav_demo %s --route %s' % (
                 console_script(kind), shlex.quote(route))
-            title += '（%s / %s）' % ('比赛' if kind == 'match' else '测试', route)
         else:
             if not os.path.isfile(VISION_SCRIPT):
                 self.log('找不到 %s。' % VISION_SCRIPT)
@@ -770,16 +865,19 @@ class LauncherApp(object):
         for sid in sids:
             name = STEPS[sid]['name']
             if self.launching_until.get(sid, 0) > time.time():
-                time.sleep(0.8)
+                time.sleep(1.2)
             pids = find_pids(STEPS[sid]['pattern'])
-            if not pids:
+            if pids:
+                terminate(pids,
+                          lambda message, n=name: self.events.put(
+                              ('log', '%s：%s' % (n, message))),
+                          grace=8.0 if sid == 1 else 5.0)
+            windows = close_step_windows(
+                sid,
+                lambda message, n=name: self.events.put(
+                    ('log', '%s：%s' % (n, message))))
+            if not pids and not windows:
                 self.events.put(('log', '%s 没有发现运行中的进程。' % name))
-                self.events.put(('stop_done', sid))
-                continue
-            terminate(pids,
-                      lambda message, n=name: self.events.put(
-                          ('log', '%s：%s' % (n, message))),
-                      grace=8.0 if sid == 1 else 5.0)
             self.events.put(('stop_done', sid))
 
     def stop_all(self):
@@ -787,28 +885,31 @@ class LauncherApp(object):
                   if find_pids(STEPS[sid]['pattern'])
                   or time.time() < self.launching_until.get(sid, 0)
                   or sid in self.stopping]
-        if not active:
-            self.log('没有发现运行中的步骤。')
+        windows = find_step_windows(list(WINDOW_PREFIX.values()))
+        if not active and not windows:
+            self.log('没有发现运行中的步骤，也没有残留的终端窗口。')
             return
-        if not messagebox.askyesno(
-                '全部停止',
-                '将停止导航、底盘、控制台、视觉（包括不是本面板启动的）。'
-                '\n\n底盘会先收到 Ctrl+C，发零速后再退出。继续？',
-                parent=self.root):
+        if active:
+            message = ('将停止导航、底盘、控制台、视觉（包括不是本面板启动的），'
+                       '并关闭对应终端窗口。\n\n底盘会先收到 Ctrl+C，发零速后再退出。继续？')
+        else:
+            message = ('没有运行中的进程，将关闭面板打开的残留终端窗口。继续？')
+        if not messagebox.askyesno('全部停止', message, parent=self.root):
             return
-        self.log('全部停止：视觉 → 控制台 → 底盘 → 导航')
+        self.log('全部停止：视觉 → 控制台 → 底盘 → 导航（含关闭终端窗口）')
         self.stop_steps([4, 3, 2, 1])
 
     def on_close(self):
         active = [sid for sid in (1, 2, 3, 4)
                   if find_pids(STEPS[sid]['pattern'])
                   or time.time() < self.launching_until.get(sid, 0)]
-        if active:
+        windows = find_step_windows(list(WINDOW_PREFIX.values()))
+        if active or windows:
             answer = messagebox.askyesnocancel(
                 '关闭面板',
-                '还有步骤在运行。\n\n'
-                '是：先停止所有进程再关闭\n'
-                '否：只关闭面板，进程继续在终端里跑\n'
+                '还有步骤在运行或终端窗口没关。\n\n'
+                '是：停止所有进程并关闭终端窗口再关闭\n'
+                '否：只关闭面板，进程和终端窗口继续保留\n'
                 '取消：回到面板',
                 parent=self.root)
             if answer is None:
@@ -820,6 +921,8 @@ class LauncherApp(object):
                     all_pids.extend(find_pids(STEPS[sid]['pattern']))
                 if all_pids:
                     terminate(all_pids, lambda message: None, grace=6.0)
+                for sid in (4, 3, 2, 1):
+                    close_step_windows(sid, lambda message: None)
         self.root.destroy()
 
 
@@ -859,7 +962,10 @@ def main():
         app.show_help()
         root.update_idletasks()
         root.update()
-        print('self-test ok: 主界面、提示窗口、状态刷新、命令行生成均未报错')
+        windows = find_step_windows(list(WINDOW_PREFIX.values()))
+        print('self-test ok: 主界面、提示窗口、状态刷新、命令行生成均未报错；'
+              '默认路线 %s，当前匹配终端窗口 %d 个'
+              % (app.route.get(), len(windows)))
         root.destroy()
         return 0
 
